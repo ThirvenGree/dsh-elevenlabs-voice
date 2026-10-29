@@ -17,7 +17,7 @@
 下载 GitHub Release 的 `.tgz`，通过 DSH 插件安装入口导入，或使用 DSH CLI：
 
 ```powershell
-dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.0.1.tgz
+dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.0.2.tgz
 ```
 
 开发安装：
@@ -88,3 +88,9 @@ npm pack
 - 下一段预取、总体进度和 request stitching；正文、工具和推理的隔离规则保留。
 
 衔接参数依据 [ElevenLabs 官方 request stitching 文档](https://elevenlabs.io/docs/eleven-api/guides/how-to/text-to-speech/request-stitching)。预取降低等待，但不保证样本级无缝音频衔接。
+
+## v1.0.2 修复
+
+- 预取失败的分段不再被缓存为失败结果，轮到该段播放时会重新请求。
+- 回答按钮按会话和消息订阅一次聊天快照，不随每次渲染重复订阅。
+- `npm run check` 补充检查 `src/shared.js` 和 `src/ui-state.js`。

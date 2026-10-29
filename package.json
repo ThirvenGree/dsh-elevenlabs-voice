@@ -1,6 +1,6 @@
 {
   "name": "dsh-elevenlabs-voice",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Unified ElevenLabs batch dictation and explicit reply playback for DeepSeek Harness",
   "type": "module",
   "main": "src/host.js",
@@ -38,7 +38,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "npm run build && node --test test/*.test.js",
-    "check": "node --check src/host.js && node --check src/core.js && node --check src/client.js",
+    "check": "node --check src/host.js && node --check src/core.js && node --check src/shared.js && node --check src/ui-state.js && node --check src/client.js",
     "prepack": "npm run check && npm test",
     "format": "prettier --write src test scripts package.json"
   },

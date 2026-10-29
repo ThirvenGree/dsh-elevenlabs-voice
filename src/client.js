@@ -487,6 +487,11 @@ window.__ModuleLoader__.load({
               return item;
             })();
             tasks.set(index, task);
+            // A failed segment (usually a prefetch) must not be reused when its
+            // turn comes; drop it so run() requests it again.
+            task.catch(() => {
+              if (tasks.get(index) === task) tasks.delete(index);
+            });
             return task;
           };
           const run = async () => {
@@ -578,25 +583,34 @@ window.__ModuleLoader__.load({
             bodyRef = useRef("");
           const [selection, setSelection] = useState(""),
             [, renderBody] = useState(0);
-          let source;
+          const chat = () =>
+            ctx.uiConversation.binding(sessionId).target("chat");
           try {
-            source = ctx.uiConversation.binding(sessionId).target("chat");
-            bodyRef.current = bodyReader(source.getSnapshot(), messageId);
+            bodyRef.current = bodyReader(chat().getSnapshot(), messageId);
           } catch {
             bodyRef.current = "";
           }
-          useEffect(
-            () =>
-              source?.subscribe?.(() => {
-                const next = bodyReader(source.getSnapshot(), messageId);
-                if (next !== bodyRef.current) {
-                  bodyRef.current = next;
-                  setSelection("");
-                  renderBody((v) => v + 1);
-                }
-              }),
-            [source, messageId],
-          );
+          // Subscribe per session/message, not per render: target() may return
+          // a fresh object on every call.
+          useEffect(() => {
+            let source;
+            try {
+              source = chat();
+            } catch {
+              return;
+            }
+            return source?.subscribe?.(() => {
+              let next = "";
+              try {
+                next = bodyReader(source.getSnapshot(), messageId);
+              } catch {}
+              if (next !== bodyRef.current) {
+                bodyRef.current = next;
+                setSelection("");
+                renderBody((v) => v + 1);
+              }
+            });
+          }, [sessionId, messageId]);
           useEffect(
             () =>
               selectionHub.register({

@@ -21,37 +21,47 @@ async function harness(config = {}, replyText = "你好，world。") {
     streams = [],
     audios = [],
     ttsBodies = [];
-  let settingsScope = null,
-    scopeCursor = 0;
-  const settingsHooks = [];
+  // A scope keeps hook state across renders of one component instance.
+  let scope = null;
+  const settingsScope = { hooks: [], cursor: 0 },
+    replyScope = { hooks: [], cursor: 0 },
+    failTts = new Set(),
+    chatListeners = new Set();
+  let chatSubscriptions = 0;
   let nextInterval = 0;
   const jsx = (type, props) => ({ type, props });
   const React = {
-    useRef: (value) => ({ current: value }),
+    useRef: (value) => {
+      if (!scope) return { current: value };
+      const i = scope.cursor++;
+      if (!scope.hooks[i]) scope.hooks[i] = { current: value };
+      return scope.hooks[i];
+    },
     useState: (value) => {
-      if (!settingsScope)
+      if (!scope)
         return [typeof value === "function" ? value() : value, () => {}];
-      const i = scopeCursor++;
-      if (!settingsHooks[i])
-        settingsHooks[i] = {
+      const hooks = scope.hooks,
+        i = scope.cursor++;
+      if (!hooks[i])
+        hooks[i] = {
           value: typeof value === "function" ? value() : value,
         };
       return [
-        settingsHooks[i].value,
+        hooks[i].value,
         (next) => {
-          settingsHooks[i].value =
-            typeof next === "function" ? next(settingsHooks[i].value) : next;
+          hooks[i].value =
+            typeof next === "function" ? next(hooks[i].value) : next;
         },
       ];
     },
     useEffect: (fn, deps) => {
-      if (settingsScope) {
-        const i = scopeCursor++,
-          old = settingsHooks[i];
+      if (scope) {
+        const i = scope.cursor++,
+          old = scope.hooks[i];
         if (old && deps && deps.every((v, j) => v === old.deps[j])) return;
         old?.off?.();
         const off = fn();
-        settingsHooks[i] = { deps, off };
+        scope.hooks[i] = { deps, off };
         if (off) cleanups.push(off);
       } else {
         const off = fn();
@@ -115,6 +125,8 @@ async function harness(config = {}, replyText = "你好，world。") {
     if (url.endsWith("/tts")) {
       ttsCalls++;
       ttsBodies.push(JSON.parse(init.body));
+      if (failTts.has(ttsCalls))
+        return Response.json({ ok: false, error: "临时故障" }, { status: 503 });
       return new Response(new Blob(["mp3"]), {
         headers: { "x-elevenlabs-request-id": "request-" + ttsCalls },
       });
@@ -245,7 +257,13 @@ async function harness(config = {}, replyText = "你好，world。") {
     },
     uiConversation: {
       binding: () => ({
+        // Deliberately a fresh object per call, like an unmemoized host binding.
         target: () => ({
+          subscribe: (fn) => {
+            chatSubscriptions++;
+            chatListeners.add(fn);
+            return () => chatListeners.delete(fn);
+          },
           getSnapshot: () => ({
             nodes: {
               values: () => [
@@ -302,13 +320,34 @@ async function harness(config = {}, replyText = "你好，world。") {
     audios,
     ttsBodies,
     settings: () => {
-      settingsScope = true;
-      scopeCursor = 0;
+      scope = settingsScope;
+      scope.cursor = 0;
       try {
         return components["elevenlabs-voice"]({});
       } finally {
-        settingsScope = null;
+        scope = null;
       }
+    },
+    // Renders the same Reply instance repeatedly with persistent hooks.
+    renderReply: () => {
+      scope = replyScope;
+      scope.cursor = 0;
+      try {
+        return components["elevenlabs-voice-play"]({
+          sessionId: "original",
+          messageId: "m",
+        });
+      } finally {
+        scope = null;
+      }
+    },
+    notifyChat: () => [...chatListeners].forEach((fn) => fn()),
+    failTts: (call) => failTts.add(call),
+    get chatSubscriptions() {
+      return chatSubscriptions;
+    },
+    get chatListeners() {
+      return chatListeners.size;
     },
     cleanups,
     intervals,
@@ -507,4 +546,29 @@ test("next chunk is prefetched once while first plays and includes stitching con
   await flush();
   assert.equal(env.ttsCalls, 2);
   env.close();
+});
+test("failed prefetch is requested again when its segment starts", async () => {
+  const env = await harness({}, "这是测试段落。".repeat(500));
+  env.failTts(2); // The prefetch of segment 2 fails once.
+  env.buttons(env.reply())[0].props.onClick();
+  await flush();
+  assert.equal(env.ttsCalls, 2);
+  assert.equal(env.audios[0].paused, false);
+  env.audios[0].onended();
+  await flush();
+  assert.equal(env.ttsCalls, 3); // Retried instead of reusing the failure.
+  assert.equal(env.audios[0].paused, false);
+  assert.ok(!JSON.stringify(env.panel()).includes("临时故障"));
+  env.close();
+});
+test("reply subscribes to the chat once across rerenders and unsubscribes", async () => {
+  const env = await harness();
+  assert.ok(env.renderReply());
+  env.renderReply();
+  env.renderReply();
+  assert.equal(env.chatSubscriptions, 1);
+  assert.equal(env.chatListeners, 1);
+  env.notifyChat(); // Snapshot change notification must not throw.
+  env.close();
+  assert.equal(env.chatListeners, 0);
 });
