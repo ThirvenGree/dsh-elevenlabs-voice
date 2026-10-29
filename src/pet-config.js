@@ -6,6 +6,8 @@ export const petDefaults = Object.freeze({
   autonomous: false,
   cooldownMinutes: 30,
   hourlyLimit: 3,
+  // One realtime conversation's limit; the panel reconnects when it ends.
+  sessionMinutes: 10,
   provider: "",
   model: "",
 });
@@ -44,6 +46,12 @@ export function petConfig(input = {}) {
     c.hourlyLimit > 20
   )
     throw Error("频率无效");
+  if (
+    !Number.isInteger(c.sessionMinutes) ||
+    c.sessionMinutes < 1 ||
+    c.sessionMinutes > 60
+  )
+    throw Error("单次对话时长应为 1–60 分钟");
   return c;
 }
 export function canSpeakAutomatically(c, recent, now = Date.now()) {

@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { WebSocketServer } from "ws";
 import { fetch, ProxyAgent } from "undici";
 import { VoiceCore, providerError } from "./core.js";
-import { PetTunnel, validUpstreamJwt } from "./pet-tunnel.js";
+import { PetTunnel, UpstreamTokenGuard } from "./pet-tunnel.js";
 import { petConfig, canSpeakAutomatically } from "./pet-config.js";
 import { parsePetTask, withoutPetTask } from "./pet-tasks.js";
 
@@ -49,6 +49,10 @@ export class PetVoiceHost {
     this.timers = new Set();
     this.cache = new Map();
     this.startingSessions = new Map();
+    this.upstreamTokens = new UpstreamTokenGuard();
+    // DSH dictation leases per page: client id -> { seq, until, at }.
+    this.dictations = new Map();
+    this.dictating = false;
     this.remoteFile = path.join(dir, "pet-engines.json");
     try {
       for (const [id, engine] of Object.entries(
@@ -75,7 +79,7 @@ export class PetVoiceHost {
       if (
         !petId ||
         !this.sockets.has(petId) ||
-        !validUpstreamJwt(
+        !this.upstreamTokens.accept(
           req.headers["x-elevenlabs-speech-engine-authorization"],
           process.env.ELEVENLABS_API_KEY,
         )
@@ -145,6 +149,40 @@ export class PetVoiceHost {
         this.send(id, { type: "disabled" });
       }
     }
+  }
+  /**
+   * DSH dictation owns the microphone while it records. Each DSH page reports
+   * start/stop with its own id and increasing seq (out-of-order requests are
+   * ignored); a start is a lease, so a page that dies mid-recording cannot
+   * mute the Pet forever.
+   */
+  setDictation(client, seq, active, ttlMs) {
+    if (typeof client !== "string" || !/^[-\w]{8,64}$/.test(client))
+      throw Error("听写来源无效");
+    if (!Number.isInteger(seq) || seq < 0) throw Error("听写序号无效");
+    const old = this.dictations.get(client),
+      now = Date.now();
+    if (old && seq <= old.seq) return;
+    this.dictations.set(client, {
+      seq,
+      until: active ? now + ttlMs : 0,
+      at: now,
+    });
+    if (this.dictations.size > 50) {
+      const [oldest] =
+        [...this.dictations.entries()]
+          .filter(([, d]) => d.until <= now)
+          .sort((a, b) => a[1].at - b[1].at)[0] || [];
+      if (oldest) this.dictations.delete(oldest);
+    }
+    this.syncDictation(now);
+  }
+  syncDictation(now = Date.now()) {
+    const active = [...this.dictations.values()].some((d) => d.until > now);
+    if (active === this.dictating) return;
+    this.dictating = active;
+    for (const id of this.sockets.keys())
+      this.send(id, { type: "dictation", active });
   }
   persist() {
     fs.writeFileSync(this.file + ".tmp", JSON.stringify(this.saved, null, 2));
@@ -229,7 +267,7 @@ export class PetVoiceHost {
       },
       language: "zh",
       privacy: { record_voice: false },
-      conversation: { max_duration_seconds: 600 },
+      conversation: { max_duration_seconds: c.sessionMinutes * 60 },
       call_limits: { agent_concurrency_limit: 1, daily_limit: 100 },
     };
   }
@@ -291,6 +329,9 @@ export class PetVoiceHost {
     this.stop(id);
     this.sockets.set(id, ws);
     this.send(id, { type: "owner" });
+    // Always report the current state: a panel that reconnects may have
+    // missed the end of a dictation.
+    this.send(id, { type: "dictation", active: this.dictating });
     ws.on("message", (bytes) => {
       try {
         const m = JSON.parse(bytes);
@@ -599,6 +640,7 @@ export class PetVoiceHost {
   }
   async tick() {
     if (this.closed) return;
+    this.syncDictation();
     const live = [...this.wss.clients].some((ws) => ws.readyState === 1);
     if (
       this.tunnel?.current &&
@@ -630,7 +672,8 @@ export class PetVoiceHost {
         event.data?.voiceProduced ||
         !event.data?.text ||
         !this.sockets.has(event.petId) ||
-        this.jobs.has(event.petId)
+        this.jobs.has(event.petId) ||
+        this.dictating
       )
         continue;
       const c = this.settings(event.petId),

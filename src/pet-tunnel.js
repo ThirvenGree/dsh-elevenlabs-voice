@@ -32,6 +32,30 @@ export function validUpstreamJwt(raw, key, now = Date.now()) {
   }
 }
 
+// Each upstream signature opens at most one connection before it expires, so a
+// relay that sees the header cannot replay it. Keyed by the decoded signature
+// bytes: several base64url spellings decode to the same bytes.
+export class UpstreamTokenGuard {
+  constructor() {
+    this.seen = new Map();
+  }
+  accept(raw, key, now = Date.now()) {
+    for (const [signature, exp] of this.seen)
+      if (exp <= now / 1000) this.seen.delete(signature);
+    if (!validUpstreamJwt(raw, key, now)) return false;
+    const parts = String(raw)
+        .replace(/^Bearer /, "")
+        .split("."),
+      signature = Buffer.from(parts[2], "base64url").toString("hex");
+    if (this.seen.has(signature)) return false;
+    this.seen.set(
+      signature,
+      JSON.parse(Buffer.from(parts[1], "base64url")).exp,
+    );
+    return true;
+  }
+}
+
 export class PetTunnel {
   constructor(dir, port, update) {
     this.dir = dir;

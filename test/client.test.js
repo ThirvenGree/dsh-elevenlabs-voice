@@ -20,7 +20,8 @@ async function harness(config = {}, replyText = "你好，world。") {
     drafts = new Map(),
     streams = [],
     audios = [],
-    ttsBodies = [];
+    ttsBodies = [],
+    dictations = [];
   // A scope keeps hook state across renders of one component instance.
   let scope = null;
   const settingsScope = { hooks: [], cursor: 0 },
@@ -130,6 +131,10 @@ async function harness(config = {}, replyText = "你好，world。") {
       return new Response(new Blob(["mp3"]), {
         headers: { "x-elevenlabs-request-id": "request-" + ttsCalls },
       });
+    }
+    if (url.endsWith("/dictation")) {
+      dictations.push(JSON.parse(init.body));
+      return Response.json({ ok: true });
     }
     if (url.endsWith("/config")) {
       Object.assign(config, JSON.parse(init.body));
@@ -319,6 +324,7 @@ async function harness(config = {}, replyText = "你好，world。") {
     streams,
     audios,
     ttsBodies,
+    dictations,
     settings: () => {
       scope = settingsScope;
       scope.cursor = 0;
@@ -571,4 +577,31 @@ test("reply subscribes to the chat once across rerenders and unsubscribes", asyn
   env.notifyChat(); // Snapshot change notification must not throw.
   env.close();
   assert.equal(env.chatListeners, 0);
+});
+test("dictation reports holding the microphone to the host, in order, including cancel", async () => {
+  const env = await harness();
+  await env.mic("original").props.onClick();
+  await flush();
+  env.mic("original").props.onClick(); // stop and upload
+  await flush();
+  assert.deepEqual(
+    env.dictations.map((d) => [d.active, d.seq]),
+    [
+      [true, 1],
+      [false, 2],
+    ],
+  );
+  assert.equal(env.dictations[0].client, env.dictations[1].client);
+  await env.mic("original").props.onClick();
+  await flush();
+  env
+    .buttons(env.panel())
+    .find((x) => x.props.children === "取消")
+    .props.onClick();
+  await flush();
+  assert.deepEqual(
+    env.dictations.map((d) => d.active),
+    [true, false, true, false],
+  );
+  env.close();
 });

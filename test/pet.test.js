@@ -7,7 +7,7 @@ import { createHash, createHmac } from "node:crypto";
 import { WebSocket } from "ws";
 import { PetVoiceHost } from "../src/pet-host.js";
 import { petConfig, canSpeakAutomatically } from "../src/pet-config.js";
-import { validUpstreamJwt } from "../src/pet-tunnel.js";
+import { validUpstreamJwt, UpstreamTokenGuard } from "../src/pet-tunnel.js";
 import { parsePetTask, withoutPetTask } from "../src/pet-tasks.js";
 test("upstream rejects expired, forged, wrong issuer and wrong algorithm tokens", () => {
   const key = "fixture-secret",
@@ -223,6 +223,118 @@ test("background audio yields to the visible panel and can resume after it close
     assert.equal(host.sockets.get("main").background, true);
   } finally {
     for (const ws of clients) ws.terminate();
+    await host.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const signUpstream = (key, claims) => {
+  const h = Buffer.from(JSON.stringify({ alg: "HS256" })).toString("base64url"),
+    p = Buffer.from(JSON.stringify(claims)).toString("base64url");
+  return (
+    h +
+    "." +
+    p +
+    "." +
+    createHmac("sha256", createHash("sha256").update(key).digest())
+      .update(h + "." + p)
+      .digest("base64url")
+  );
+};
+test("each upstream signature is accepted once, whatever its base64url spelling", () => {
+  const key = "fixture-secret",
+    now = Date.now(),
+    guard = new UpstreamTokenGuard();
+  const claims = {
+    iss: "https://api.elevenlabs.io/convai/speech-engine",
+    sub: "convai_speech_engine_upstream",
+    exp: now / 1000 + 30,
+  };
+  const token = signUpstream(key, claims);
+  assert.equal(guard.accept(token, key, now), true);
+  assert.equal(guard.accept(token, key, now), false); // replay
+  assert.equal(guard.accept("Bearer " + token, key, now), false);
+  // Flip an unused low bit of the last base64url character: same bytes.
+  const alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const last = alphabet[alphabet.indexOf(token.at(-1)) ^ 1],
+    respelled = token.slice(0, -1) + last;
+  assert.notEqual(respelled, token);
+  assert.equal(validUpstreamJwt(respelled, key, now), true);
+  assert.equal(guard.accept(respelled, key, now), false);
+  assert.equal(guard.accept("forged.token.x", key, now), false);
+  // A different, newly issued signature still connects.
+  assert.equal(
+    guard.accept(signUpstream(key, { ...claims, iat: 1 }), key, now),
+    true,
+  );
+  // Expired signatures are forgotten, even when the arriving token is invalid.
+  assert.equal(guard.seen.size, 2);
+  assert.equal(guard.accept(token, key, now + 60000), false);
+  assert.equal(guard.seen.size, 0);
+});
+test("realtime session limit is per-Pet configurable, default 10 minutes", () => {
+  assert.equal(petConfig().sessionMinutes, 10);
+  assert.equal(petConfig({ sessionMinutes: 25 }).sessionMinutes, 25);
+  for (const sessionMinutes of [0, 61, 1.5, "10"])
+    assert.throws(() => petConfig({ sessionMinutes }));
+  const host = Object.create(PetVoiceHost.prototype);
+  host.config = () => ({ voiceId: "fallback" });
+  host.saved = { main: { sessionMinutes: 25 } };
+  const body = host.engineBody("main", "wss://x", { route: "/upstream/r" });
+  assert.equal(body.conversation.max_duration_seconds, 1500);
+  host.saved = {};
+  assert.equal(
+    host.engineBody("main", "wss://x", { route: "/upstream/r" }).conversation
+      .max_duration_seconds,
+    600,
+  );
+});
+test("DSH dictation pauses the Pet panel as an ordered, expiring lease", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "dsh-pet-dictation-"));
+  const host = new PetVoiceHost(
+    {
+      get: () => ({
+        describe: () => ({ model: {} }),
+        speaking: () => {},
+        events: () => [],
+      }),
+    },
+    dir,
+    () => ({ enabled: true }),
+  );
+  let ws;
+  try {
+    const { url } = await host.panel("main");
+    const messages = [];
+    ws = new WebSocket(url.replace("http:", "ws:") + "socket");
+    ws.on("message", (bytes) => {
+      const m = JSON.parse(bytes);
+      if (m.type === "dictation") messages.push(m.active);
+    });
+    await new Promise((resolve) => ws.once("open", resolve));
+    const settle = () => new Promise((r) => setTimeout(r, 20));
+    await settle();
+    assert.deepEqual(messages, [false]); // state reported on connect
+    host.setDictation("page-aaaaaaaa", 1, true, 60000);
+    await settle();
+    host.setDictation("page-aaaaaaaa", 1, false, 60000); // stale seq ignored
+    await settle();
+    assert.deepEqual(messages, [false, true]);
+    host.setDictation("page-aaaaaaaa", 2, false, 60000);
+    await settle();
+    assert.deepEqual(messages, [false, true, false]);
+    // A page that dies mid-recording cannot mute the Pet forever.
+    host.setDictation("page-aaaaaaaa", 3, true, 20);
+    await settle();
+    await settle();
+    host.syncDictation();
+    await settle();
+    assert.deepEqual(messages, [false, true, false, true, false]);
+    assert.throws(() => host.setDictation("x", 1, true, 1000));
+    assert.throws(() => host.setDictation("page-bbbbbbbb", -1, true, 1000));
+  } finally {
+    ws?.terminate();
     await host.close();
     rmSync(dir, { recursive: true, force: true });
   }

@@ -20,7 +20,8 @@ let conversation = null,
   liveReply = null,
   lastLine = "",
   playback = 0,
-  finishAudio = null;
+  finishAudio = null,
+  dictating = false;
 const status = (text) => {
   $("status").textContent = text;
 };
@@ -80,6 +81,26 @@ function stopAudio() {
     audioUrl = "";
   }
   speaking(false);
+}
+// While DSH dictation records, the Pet neither listens nor plays sound, so
+// it does not answer the dictation or leak its own voice into it.
+function applyDictation() {
+  if (conversation) {
+    conversation.setMicMuted(dictating);
+    conversation.setVolume({ volume: dictating ? 0 : volume });
+  }
+}
+function setDictating(active) {
+  if (active === dictating) return;
+  dictating = active;
+  if (active) stopAudio();
+  applyDictation();
+  if (conversation)
+    status(
+      active
+        ? "DSH 听写中，Pet 暂停收听"
+        : "实时对话已恢复，可以说话；再次说话可打断。",
+    );
 }
 async function say(text) {
   stopAudio();
@@ -170,6 +191,7 @@ async function start(reconnecting = false) {
     }
     conversation = next;
     conversation.setVolume({ volume });
+    applyDictation();
   } catch (error) {
     wanted = false;
     status("连接失败：" + error.message);
@@ -227,7 +249,8 @@ function connectUi() {
     }
     if (m.type === "task") showTask(m);
     if (m.type === "error") status(m.error);
-    if (m.type === "speak" && !wanted && !audio)
+    if (m.type === "dictation") setDictating(m.active === true);
+    if (m.type === "speak" && !wanted && !audio && !dictating)
       void say(m.text).catch(playbackError);
   };
   ws.onclose = (event) => {

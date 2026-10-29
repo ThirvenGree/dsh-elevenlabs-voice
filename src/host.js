@@ -118,6 +118,19 @@ export function apply(ctx) {
             petVoice.configurationChanged();
             return json(res, 200, { ok: true, config });
           }
+          // Before the busy limiter: a mic hand-off must never be refused.
+          if (route === "/dictation" && req.method === "POST") {
+            const { client, seq, active } = JSON.parse(
+              (await readBody(req, 1024)).toString(),
+            );
+            petVoice.setDictation(
+              client,
+              seq,
+              active === true,
+              (config.maxSeconds + 60) * 1000,
+            );
+            return json(res, 200, { ok: true });
+          }
           if (req.method !== "POST")
             return json(res, 405, { ok: false, error: "不支持的方法" });
           if (active >= 3)

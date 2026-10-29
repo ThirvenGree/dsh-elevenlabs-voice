@@ -167,10 +167,27 @@ window.__ModuleLoader__.load({
               stopPlayback();
           }
         }
+        // Tell the host while dictation holds the microphone so a live Pet
+        // conversation pauses listening and speaking. Fire-and-forget; the
+        // host treats a start as a lease, and seq orders racing requests.
+        const dictationClient =
+          Math.random().toString(36).slice(2) + Date.now().toString(36);
+        let dictationSeq = 0,
+          dictationOn = false;
+        function dictation(active) {
+          if (dictationOn === active) return;
+          dictationOn = active;
+          void request("/dictation", {
+            client: dictationClient,
+            seq: ++dictationSeq,
+            active,
+          }).catch(() => {});
+        }
         function cleanupRecording(r) {
           clearInterval(r.timer);
           r.stream?.getTracks().forEach((t) => t.stop());
           void r.context?.close().catch(() => {});
+          if (!rec || rec === r) dictation(false);
         }
         function exists(sid) {
           try {
@@ -288,6 +305,7 @@ window.__ModuleLoader__.load({
             abort: new AbortController(),
           };
           rec = r;
+          dictation(true);
           update({
             recording: "requesting",
             status: "等待麦克风权限…",
