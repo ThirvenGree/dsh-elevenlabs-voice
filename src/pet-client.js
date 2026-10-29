@@ -1,5 +1,8 @@
 import { Conversation } from "@elevenlabs/client";
 import { chunks } from "./shared.js";
+const background =
+  new URLSearchParams(location.search).get("background") === "1";
+let unloading = false;
 const $ = (id) => document.getElementById(id),
   token = location.pathname.split("/")[2],
   base = location.pathname;
@@ -21,6 +24,13 @@ let conversation = null,
 const status = (text) => {
   $("status").textContent = text;
 };
+function playbackError(error) {
+  status(error.message);
+  if (background)
+    void api("notice", {
+      text: "Pet 语音播放失败：" + String(error.message).slice(0, 400),
+    }).catch(() => {});
+}
 const send = (value) => {
   if (ws?.readyState === 1) ws.send(JSON.stringify(value));
 };
@@ -189,9 +199,15 @@ async function refresh() {
 }
 // A single owner per Pet prevents desktop and web from speaking the same line twice.
 function connectUi() {
-  ws = new WebSocket(location.origin.replace(/^http/, "ws") + base + "socket");
+  ws = new WebSocket(
+    location.origin.replace(/^http/, "ws") +
+      base +
+      "socket" +
+      (background ? "?background=1" : ""),
+  );
   ws.onmessage = (event) => {
     const m = JSON.parse(event.data);
+    if (m.type === "owner" && background) void refresh().catch(playbackError);
     if (m.type === "disabled") {
       void stop();
       status("统一语音已关闭");
@@ -212,10 +228,14 @@ function connectUi() {
     if (m.type === "task") showTask(m);
     if (m.type === "error") status(m.error);
     if (m.type === "speak" && !wanted && !audio)
-      void say(m.text).catch((error) => status(error.message));
+      void say(m.text).catch(playbackError);
   };
   ws.onclose = (event) => {
     void stop(false);
+    if (background && !unloading) {
+      retry = setTimeout(connectUi, 5000);
+      return;
+    }
     if (event.code === 4001) status("语音面板已在另一端打开");
     else status("本机连接已断开，请重新打开面板");
   };
@@ -283,6 +303,8 @@ $("clear").onclick = async () => {
   }
 };
 window.addEventListener("pagehide", () => {
+  unloading = true;
+  clearTimeout(retry);
   wanted = false;
   generation++;
   request?.abort();
@@ -292,7 +314,7 @@ window.addEventListener("pagehide", () => {
   ws?.close();
 });
 connectUi();
-void refresh().catch((error) => status(error.message));
+if (!background) void refresh().catch((error) => status(error.message));
 
 function showTask(m) {
   const button = document.createElement("button");

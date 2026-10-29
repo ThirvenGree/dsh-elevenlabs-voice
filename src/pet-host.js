@@ -97,7 +97,12 @@ export class PetVoiceHost {
         return;
       }
       this.uiWs.handleUpgrade(req, socket, head, (ws) =>
-        this.connectUi(entry.petId, ws),
+        this.connectUi(
+          entry.petId,
+          ws,
+          new URL(req.url, "http://local").searchParams.get("background") ===
+            "1",
+        ),
       );
     });
     this.ready = Promise.all([listen(this.upstream), listen(this.server)]).then(
@@ -276,10 +281,16 @@ export class PetVoiceHost {
     );
     return { signedUrl: signed.signed_url };
   }
-  connectUi(id, ws) {
+  connectUi(id, ws, background = false) {
+    if (background && this.sockets.has(id)) {
+      ws.close(4002, "已有音频拥有者");
+      return;
+    }
+    ws.background = background;
     this.sockets.get(id)?.close(4001, "已在另一端打开语音");
     this.stop(id);
     this.sockets.set(id, ws);
+    this.send(id, { type: "owner" });
     ws.on("message", (bytes) => {
       try {
         const m = JSON.parse(bytes);
@@ -488,6 +499,12 @@ export class PetVoiceHost {
         this.stop(id);
         return json(res, { ok: true });
       }
+      if (route === "notice") {
+        if (typeof data.text !== "string" || data.text.length > 500)
+          throw Error("提示无效");
+        this.bridge().say(id, data.text);
+        return json(res, { ok: true });
+      }
       if (route === "task") {
         const offer = this.taskOffers.get(data.taskId);
         if (!offer || offer.petId !== id || offer.expires < Date.now())
@@ -582,9 +599,10 @@ export class PetVoiceHost {
   }
   async tick() {
     if (this.closed) return;
+    const live = [...this.wss.clients].some((ws) => ws.readyState === 1);
     if (
       this.tunnel?.current &&
-      this.sockets.size &&
+      live &&
       Date.now() > (this.tunnelRetry || 0) &&
       (Date.now() - this.tunnel.started > 45 * 60000 ||
         this.tunnel.current.exitCode !== null)
@@ -617,7 +635,7 @@ export class PetVoiceHost {
         continue;
       const c = this.settings(event.petId),
         recent = this.rates.get(event.petId) || [];
-      if (!canSpeakAutomatically(c, recent)) continue;
+      if (!this.config().enabled || !canSpeakAutomatically(c, recent)) continue;
       recent.push(Date.now());
       this.rates.set(
         event.petId,
@@ -628,7 +646,7 @@ export class PetVoiceHost {
         text: String(event.data.text).slice(0, 2400),
       });
     }
-    if (!this.sockets.size && this.tunnel?.current) {
+    if (!live && !this.startingSessions.size && this.tunnel?.current) {
       this.idleSince ??= Date.now();
       if (Date.now() - this.idleSince > 60000) {
         this.tunnel.close();

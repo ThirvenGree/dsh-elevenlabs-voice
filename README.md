@@ -17,7 +17,7 @@
 下载 GitHub Release 的 `.tgz`，通过 DSH 插件安装入口导入，或使用 DSH CLI：
 
 ```powershell
-dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.1.0.tgz
+dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.1.1.tgz
 ```
 
 开发安装：
@@ -129,3 +129,8 @@ Key 仍只从 `ELEVENLABS_API_KEY` 读取，需现有 STT/TTS 权限以及 Eleve
 如果一键启动器通过“宿主拥有的第一个端口”寻找 DSH，需要改为验证主服务的 `401 dsh web authentication required` 响应：插件也可以拥有自己的本机监听端口。
 
 官方协议：[Speech Engine](https://elevenlabs.io/docs/eleven-api/guides/cookbooks/speech-engine)、[上游签名和流协议](https://elevenlabs.io/docs/api-reference/speech-engine/speech-engine-upstream)、[JavaScript 客户端](https://elevenlabs.io/docs/eleven-agents/libraries/java-script)、[Pinggy 使用说明](https://pinggy.io/docs/usages/)。
+
+
+## v1.1.1 后台播放
+
+现有 Pet 自带隐藏的无麦克风播放器，启用自动出声后无需一直打开语音面板。面板打开时优先取得音频所有权，关闭后后台自动恢复；多端仍只播放一次。后台不申请麦克风，默认自动出声关闭，出错时回到 Pet 气泡显示。没有实时连接时关闭公网隧道，后台播放器不会导致隧道持续续期。

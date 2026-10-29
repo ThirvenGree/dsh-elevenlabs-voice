@@ -179,3 +179,51 @@ test("a new user turn aborts the old model generation and does not emit late chu
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("background audio yields to the visible panel and can resume after it closes", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "dsh-pet-owner-"));
+  const host = new PetVoiceHost(
+    {
+      get: () => ({
+        describe: () => ({ model: {} }),
+        speaking: () => {},
+        events: () => [],
+      }),
+    },
+    dir,
+    () => ({ enabled: true }),
+  );
+  const clients = [];
+  try {
+    const { url } = await host.panel("main");
+    const open = async (background) => {
+      const ws = new WebSocket(
+        url.replace("http:", "ws:") +
+          "socket" +
+          (background ? "?background=1" : ""),
+      );
+      clients.push(ws);
+      const closed = new Promise((resolve) => ws.once("close", resolve));
+      await new Promise((resolve, reject) => {
+        ws.once("open", resolve);
+        ws.once("error", reject);
+      });
+      return { ws, closed };
+    };
+    const first = await open(true);
+    const panel = await open(false);
+    assert.equal(await first.closed, 4001);
+    const rejected = await open(true);
+    assert.equal(await rejected.closed, 4002);
+    assert.equal(host.sockets.get("main").background, false);
+    panel.ws.close();
+    await panel.closed;
+    await new Promise((r) => setTimeout(r, 10));
+    await open(true);
+    assert.equal(host.sockets.get("main").background, true);
+  } finally {
+    for (const ws of clients) ws.terminate();
+    await host.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
