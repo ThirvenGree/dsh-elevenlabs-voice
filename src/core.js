@@ -9,7 +9,33 @@ export class VoiceError extends Error {
 }
 export function providerError(status, detail) {
   const tag = String(detail?.detail?.status || detail?.status || "");
-  if (/missing_permissions|permission/i.test(tag))
+  const known = {
+    invalid_api_key: ["invalid_key", "API key 无效或已失效", 401],
+    quota_exceeded: ["quota", "ElevenLabs 额度不足，请检查余额和方案", 402],
+    insufficient_credits: [
+      "quota",
+      "ElevenLabs 额度不足，请检查余额和方案",
+      402,
+    ],
+    max_character_limit_exceeded: [
+      "text_size",
+      "单次文本超过模型字符上限，请缩短单段文字或更换模型",
+      400,
+    ],
+    voice_not_found: [
+      "voice_not_found",
+      "Voice ID 不存在，请检查声音配置",
+      404,
+    ],
+    model_not_found: ["not_found", "模型不存在，请检查模型 ID", 404],
+    missing_permissions: [
+      "permission",
+      "API key 缺少此操作权限，请检查 ElevenLabs key 的 STT/TTS/模型读取权限",
+      403,
+    ],
+  };
+  if (Object.hasOwn(known, tag)) return new VoiceError(...known[tag]);
+  if (tag === "permission_denied")
     return new VoiceError(
       "permission",
       "API key 缺少此操作权限，请检查 ElevenLabs key 的 STT/TTS/模型读取权限",
@@ -17,7 +43,7 @@ export function providerError(status, detail) {
     );
   if (status === 401)
     return new VoiceError("invalid_key", "API key 无效或已失效", 401);
-  if (status === 402 || /quota|credit|limit_exceeded/i.test(tag))
+  if (status === 402)
     return new VoiceError(
       "quota",
       "ElevenLabs 额度不足或账户限制，请检查余额和方案",
@@ -54,7 +80,7 @@ export class VoiceCore {
     this.key = key;
     this.fetch = fetch;
     this.timeout = timeout;
-    this.pending = new Set();
+    this.pending = new Map();
     this.receipts = [];
     this.proxyAgent = null;
     this.proxyUrl = "";
@@ -78,9 +104,20 @@ export class VoiceCore {
       );
     return c;
   }
-  abort() {
-    for (const c of this.pending) c.abort();
-    this.pending.clear();
+  abort(feature) {
+    for (const [c, kind] of this.pending)
+      if (!feature || kind === feature) c.abort();
+  }
+  configurationChanged(before, next) {
+    if (
+      (before.enabled && !next.enabled) ||
+      (before.dshEnabled && !next.dshEnabled)
+    )
+      this.abort();
+    else {
+      if (before.sttEnabled && !next.sttEnabled) this.abort("stt");
+      if (before.playbackEnabled && !next.playbackEnabled) this.abort("tts");
+    }
   }
   async close() {
     this.disposed = true;
@@ -90,7 +127,7 @@ export class VoiceCore {
   async request(path, init, signal, feature) {
     const c = this.assert(feature),
       controller = new AbortController();
-    this.pending.add(controller);
+    this.pending.set(controller, feature || "connection");
     const timer = setTimeout(
       () => controller.abort(new DOMException("Timeout", "TimeoutError")),
       this.timeout,
@@ -216,7 +253,7 @@ export class VoiceCore {
     );
     return { ...transcriptResult(data), receipt };
   }
-  async synthesize(text, signal) {
+  async synthesize(text, signal, stitching = {}) {
     const c = this.assert("tts");
     if (!c.voiceId)
       throw new VoiceError(
@@ -225,6 +262,28 @@ export class VoiceCore {
       );
     if (typeof text !== "string" || !text.trim() || text.length > 2500)
       throw new VoiceError("text_size", "单段朗读文本应为 1–2500 字符");
+    const context = {};
+    if (c.ttsModel !== "eleven_v3") {
+      for (const key of ["previous_text", "next_text"])
+        if (stitching[key] !== undefined) {
+          if (
+            typeof stitching[key] !== "string" ||
+            stitching[key].length > 2500
+          )
+            throw new VoiceError("stitching", "分段上下文格式无效");
+          if (stitching[key]) context[key] = stitching[key];
+        }
+      if (stitching.previous_request_ids !== undefined) {
+        const ids = stitching.previous_request_ids;
+        if (
+          !Array.isArray(ids) ||
+          ids.length > 3 ||
+          ids.some((id) => typeof id !== "string" || !/^[-\w]{1,128}$/.test(id))
+        )
+          throw new VoiceError("stitching", "分段请求编号无效");
+        if (ids.length) context.previous_request_ids = ids;
+      }
+    }
     return this.request(
       "/text-to-speech/" +
         encodeURIComponent(c.voiceId) +
@@ -232,7 +291,7 @@ export class VoiceCore {
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, model_id: c.ttsModel }),
+        body: JSON.stringify({ text, model_id: c.ttsModel, ...context }),
       },
       signal,
       "tts",

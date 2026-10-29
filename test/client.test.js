@@ -6,7 +6,7 @@ import { defaults } from "../src/shared.js";
 const flush = async () => {
   for (let n = 0; n < 8; n++) await new Promise((r) => setImmediate(r));
 };
-async function harness(config = {}) {
+async function harness(config = {}, replyText = "你好，world。") {
   let factory,
     now = 0,
     transcription = { text: "今天好", hasSpeech: true },
@@ -19,17 +19,44 @@ async function harness(config = {}) {
     intervals = new Map(),
     drafts = new Map(),
     streams = [],
-    audios = [];
+    audios = [],
+    ttsBodies = [];
+  let settingsScope = null,
+    scopeCursor = 0;
+  const settingsHooks = [];
   let nextInterval = 0;
   const jsx = (type, props) => ({ type, props });
   const React = {
-    useState: (value) => [
-      typeof value === "function" ? value() : value,
-      () => {},
-    ],
-    useEffect: (fn) => {
-      const off = fn();
-      if (off) cleanups.push(off);
+    useRef: (value) => ({ current: value }),
+    useState: (value) => {
+      if (!settingsScope)
+        return [typeof value === "function" ? value() : value, () => {}];
+      const i = scopeCursor++;
+      if (!settingsHooks[i])
+        settingsHooks[i] = {
+          value: typeof value === "function" ? value() : value,
+        };
+      return [
+        settingsHooks[i].value,
+        (next) => {
+          settingsHooks[i].value =
+            typeof next === "function" ? next(settingsHooks[i].value) : next;
+        },
+      ];
+    },
+    useEffect: (fn, deps) => {
+      if (settingsScope) {
+        const i = scopeCursor++,
+          old = settingsHooks[i];
+        if (old && deps && deps.every((v, j) => v === old.deps[j])) return;
+        old?.off?.();
+        const off = fn();
+        settingsHooks[i] = { deps, off };
+        if (off) cleanups.push(off);
+      } else {
+        const off = fn();
+        if (off) cleanups.push(off);
+      }
     },
   };
   class Recorder {
@@ -87,7 +114,14 @@ async function harness(config = {}) {
     }
     if (url.endsWith("/tts")) {
       ttsCalls++;
-      return new Response(new Blob(["mp3"]));
+      ttsBodies.push(JSON.parse(init.body));
+      return new Response(new Blob(["mp3"]), {
+        headers: { "x-elevenlabs-request-id": "request-" + ttsCalls },
+      });
+    }
+    if (url.endsWith("/config")) {
+      Object.assign(config, JSON.parse(init.body));
+      return Response.json({ ok: true });
     }
     throw Error("unexpected route " + url);
   };
@@ -223,7 +257,7 @@ async function harness(config = {}) {
                         messageId: "m",
                         blocks: [
                           { kind: "reasoning", text: "hidden" },
-                          { kind: "text", text: "你好，world。" },
+                          { kind: "text", text: replyText },
                         ],
                       },
                     },
@@ -266,6 +300,16 @@ async function harness(config = {}) {
     drafts,
     streams,
     audios,
+    ttsBodies,
+    settings: () => {
+      settingsScope = true;
+      scopeCursor = 0;
+      try {
+        return components["elevenlabs-voice"]({});
+      } finally {
+        settingsScope = null;
+      }
+    },
     cleanups,
     intervals,
     get sttCalls() {
@@ -405,5 +449,62 @@ test("TTS never runs until explicit click; replay uses session memory cache", as
     .find((b) => b.props.children === "停止")
     .props.onClick();
   assert.equal(env.audios.at(-1).paused, true);
+  env.close();
+});
+
+test("keyterm textarea keeps trailing newline across actual component rerenders", async () => {
+  const config = {},
+    env = await harness(config);
+  const find = (node, predicate) => {
+    if (!node) return null;
+    if (Array.isArray(node)) {
+      for (const n of node) {
+        const found = find(n, predicate);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (typeof node !== "object") return null;
+    if (predicate(node)) return node;
+    return find(node.props?.children, predicate);
+  };
+  const terms = (node) =>
+    find(node, (x) => x.type === "textarea" && x.props.rows === 5);
+  let ui = env.settings();
+  terms(ui).props.onChange({ target: { value: "config.json\n" } });
+  ui = env.settings();
+  assert.equal(terms(ui).props.value, "config.json\n");
+  terms(ui).props.onChange({ target: { value: "config.json\n\ntimeout\n" } });
+  ui = env.settings();
+  assert.equal(terms(ui).props.value, "config.json\n\ntimeout\n");
+  await env
+    .buttons(ui)
+    .find((b) => b.props.children === "保存设置")
+    .props.onClick();
+  await flush();
+  assert.deepEqual(config.keyterms, ["config.json", "timeout"]);
+  env.close();
+});
+test("next chunk is prefetched once while first plays and includes stitching context", async () => {
+  const env = await harness({}, "这是测试段落。".repeat(500));
+  env.buttons(env.reply())[0].props.onClick();
+  await flush();
+  assert.equal(env.ttsCalls, 2);
+  assert.equal(env.audios[0].paused, false);
+  assert.ok(env.ttsBodies[0].stitching.next_text);
+  assert.equal(env.ttsBodies[1].stitching.previous_request_ids[0], "request-1");
+  env.audios[0].currentTime = 1.5;
+  env.audios[0].ontimeupdate();
+  let panel = env.panel();
+  assert.ok(JSON.stringify(panel).includes("整体播放进度"));
+  env.audios[0].onended();
+  await flush();
+  assert.equal(env.ttsCalls, 2); // Two chunks: transition consumes prefetched audio.
+  env
+    .buttons(env.panel())
+    .find((b) => b.props.children === "重播")
+    .props.onClick();
+  await flush();
+  assert.equal(env.ttsCalls, 2);
   env.close();
 });

@@ -1,6 +1,6 @@
 {
   "name": "dsh-elevenlabs-voice",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Unified ElevenLabs batch dictation and explicit reply playback for DeepSeek Harness",
   "type": "module",
   "main": "src/host.js",

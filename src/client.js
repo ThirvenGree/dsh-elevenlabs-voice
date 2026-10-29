@@ -1,10 +1,18 @@
-import { insertion, chunks, assistantBody, spokenText } from "./shared.js";
+import { insertion, chunks } from "./shared.js";
+import {
+  createStore,
+  replyConfig,
+  createBodyReader,
+  createSelectionHub,
+  selectedBody,
+  parseKeyterms,
+} from "./ui-state.js";
 window.__ModuleLoader__.load({
   id: "dsh-elevenlabs-voice",
   factory(require) {
     const R = require("react"),
       { jsx: h } = require("react/jsx-runtime");
-    const { useState, useEffect } = R;
+    const { useState, useEffect, useRef } = R;
     return {
       name: "elevenlabs-voice",
       inject: ["slots", "conversation", "uiConversation", "sessions"],
@@ -28,22 +36,26 @@ window.__ModuleLoader__.load({
           rec = null,
           recordGeneration = 0,
           playerGeneration = 0;
-        const listeners = new Set(),
+        const store = createStore(state),
           requests = new Set(),
           cache = new Map();
+        const bodyReader = createBodyReader(),
+          selectionHub = createSelectionHub(document, () =>
+            window.getSelection(),
+          );
+        const identity = (s) => s;
         let cacheBytes = 0;
         const update = (patch) => {
           state = { ...state, ...patch };
-          for (const fn of listeners) fn();
+          store.set(patch);
         };
-        function useStore() {
+        function useStore(select = identity) {
           const [, render] = useState(0);
-          useEffect(() => {
-            const fn = () => render((v) => v + 1);
-            listeners.add(fn);
-            return () => listeners.delete(fn);
-          }, []);
-          return state;
+          useEffect(
+            () => store.subscribe(select, () => render((v) => v + 1)),
+            [select],
+          );
+          return select(state);
         }
         async function request(route, body, options = {}) {
           const controller = new AbortController();
@@ -79,7 +91,12 @@ window.__ModuleLoader__.load({
               } catch {}
               throw Error(e?.error || "请求失败 HTTP " + res.status);
             }
-            return options.audio ? res.blob() : res.json();
+            return options.audio
+              ? {
+                  blob: await res.blob(),
+                  requestId: res.headers.get("x-elevenlabs-request-id") || null,
+                }
+              : await res.json();
           } finally {
             requests.delete(controller);
             options.signal?.removeEventListener("abort", abort);
@@ -350,34 +367,45 @@ window.__ModuleLoader__.load({
             if (!disposed) update({ devices: list || [] });
           } catch {}
         }
-        async function cachedAudio(text, sid, config, signal) {
+        async function cachedAudio(text, sid, config, signal, stitching = {}) {
           const key = JSON.stringify([
             sid,
             text,
             config.voiceId,
             config.ttsModel,
             "mp3_44100_128",
+            stitching.previous_text || "",
+            stitching.next_text || "",
           ]);
           if (cache.has(key)) {
             const item = cache.get(key);
             cache.delete(key);
             cache.set(key, item);
-            return item.url;
+            return item;
           }
-          const blob = await request("/tts", { text }, { audio: true, signal });
+          const { blob, requestId } = await request(
+            "/tts",
+            { text, stitching },
+            { audio: true, signal },
+          );
           if (signal.aborted || disposed)
             throw new DOMException("Cancelled", "AbortError");
-          const item = { url: URL.createObjectURL(blob), size: blob.size };
+          const item = {
+            url: URL.createObjectURL(blob),
+            size: blob.size,
+            requestId,
+            at: Date.now(),
+          };
           cache.set(key, item);
           cacheBytes += blob.size;
           while (cache.size > 64 || cacheBytes > 64 * 1024 * 1024) {
-            const first = cache.keys().next().value;
-            const old = cache.get(first);
+            const first = cache.keys().next().value,
+              old = cache.get(first);
             cache.delete(first);
             cacheBytes -= old.size;
             URL.revokeObjectURL(old.url);
           }
-          return item.url;
+          return item;
         }
         async function play(text, sid, label = "回答") {
           if (!allowed("tts")) return;
@@ -399,13 +427,15 @@ window.__ModuleLoader__.load({
             loading: true,
             progress: 0,
             label,
+            segmentProgress: 0,
           };
           p.audio.volume = cfg.volume;
           update({ player: p, error: "" });
           p.audio.ontimeupdate = () => {
-            p.progress = p.audio.duration
+            p.segmentProgress = p.audio.duration
               ? p.audio.currentTime / p.audio.duration
               : 0;
+            p.progress = (p.index + p.segmentProgress) / parts.length;
             if (state.player?.audio === p.audio)
               update({
                 player: {
@@ -422,18 +452,54 @@ window.__ModuleLoader__.load({
             p.paused = false;
             if (state.player?.audio === p.audio) update({ player: { ...p } });
           };
+          const tasks = new Map(),
+            items = new Map();
+          const prepare = (index) => {
+            if (tasks.has(index)) return tasks.get(index);
+            const task = (async () => {
+              const stitching =
+                cfg.ttsModel === "eleven_v3"
+                  ? {}
+                  : {
+                      previous_text: parts[index - 1] || "",
+                      next_text: parts[index + 1] || "",
+                    };
+              const previous = [...items.entries()]
+                .filter(
+                  ([i, item]) =>
+                    i < index &&
+                    item.requestId &&
+                    Date.now() - item.at < 2 * 60 * 60 * 1000,
+                )
+                .sort((a, b) => a[0] - b[0])
+                .slice(-3)
+                .map(([, item]) => item.requestId);
+              if (previous.length && cfg.ttsModel !== "eleven_v3")
+                stitching.previous_request_ids = previous;
+              const item = await cachedAudio(
+                parts[index],
+                sid,
+                cfg,
+                abort.signal,
+                stitching,
+              );
+              items.set(index, item);
+              return item;
+            })();
+            tasks.set(index, task);
+            return task;
+          };
           const run = async () => {
             if (generation !== playerGeneration || abort.signal.aborted) return;
             try {
               p.loading = true;
+              p.segmentProgress = 0;
+              p.progress = p.index / parts.length;
               update({ player: { ...p } });
-              p.audio.src = await cachedAudio(
-                parts[p.index],
-                sid,
-                cfg,
-                abort.signal,
-              );
-              if (generation !== playerGeneration) return;
+              const item = await prepare(p.index);
+              if (generation !== playerGeneration || abort.signal.aborted)
+                return;
+              p.audio.src = item.url;
               if (cfg.outputDevice) {
                 if (!p.audio.setSinkId)
                   throw Error("此浏览器不支持选择输出设备，请改用系统默认");
@@ -442,8 +508,13 @@ window.__ModuleLoader__.load({
               p.loading = false;
               update({ player: { ...p } });
               await p.audio.play();
+              if (generation !== playerGeneration || abort.signal.aborted)
+                return;
+              // At most one segment ahead, and only after explicit playback starts.
+              if (p.index + 1 < parts.length)
+                void prepare(p.index + 1).catch(() => {});
             } catch (e) {
-              if (e.name !== "AbortError" && generation === playerGeneration) {
+              if (e.name !== "AbortError" && generation === playerGeneration)
                 update({
                   error:
                     e.name === "NotAllowedError"
@@ -451,7 +522,6 @@ window.__ModuleLoader__.load({
                       : e.message,
                   player: { ...p, loading: false, paused: true },
                 });
-              }
             }
           };
           p.audio.onended = () => {
@@ -473,28 +543,6 @@ window.__ModuleLoader__.load({
           };
           p.replay = () => void play(text, sid, label);
           void run();
-        }
-        function selected(body, button) {
-          const selection = window.getSelection();
-          if (!selection || selection.isCollapsed || !selection.rangeCount)
-            return "";
-          const text = selection.toString().trim();
-          if (!text || !spokenText(body).includes(spokenText(text))) return "";
-          const node = selection.anchorNode?.parentElement,
-            focus = selection.focusNode?.parentElement;
-          if (!node || !focus) return "";
-          const turn = button?.closest("[data-chat-turn]");
-          if (!turn || !turn.contains(node) || !turn.contains(focus)) return "";
-          if (
-            node.closest(
-              "[data-turn-process],[data-step-process-content],details",
-            ) ||
-            focus.closest(
-              "[data-turn-process],[data-step-process-content],details",
-            )
-          )
-            return "";
-          return text;
         }
         function Mic({ sessionId }) {
           const s = useStore();
@@ -525,45 +573,68 @@ window.__ModuleLoader__.load({
           });
         }
         function Reply({ sessionId, messageId }) {
-          const s = useStore(),
-            [selection, setSelection] = useState("");
-          let body = "";
+          const config = useStore(replyConfig),
+            element = useRef(null),
+            bodyRef = useRef("");
+          const [selection, setSelection] = useState(""),
+            [, renderBody] = useState(0);
+          let source;
           try {
-            body = assistantBody(
-              ctx.uiConversation
-                .binding(sessionId)
-                .target("chat")
-                .getSnapshot(),
-              messageId,
-            );
-          } catch {}
-          useEffect(() => {
-            const fn = () =>
-              setSelection(window.getSelection()?.toString().trim() || "");
-            document.addEventListener("selectionchange", fn);
-            return () => document.removeEventListener("selectionchange", fn);
-          }, []);
-          if (!allowed("tts") || !body) return null;
+            source = ctx.uiConversation.binding(sessionId).target("chat");
+            bodyRef.current = bodyReader(source.getSnapshot(), messageId);
+          } catch {
+            bodyRef.current = "";
+          }
+          useEffect(
+            () =>
+              source?.subscribe?.(() => {
+                const next = bodyReader(source.getSnapshot(), messageId);
+                if (next !== bodyRef.current) {
+                  bodyRef.current = next;
+                  setSelection("");
+                  renderBody((v) => v + 1);
+                }
+              }),
+            [source, messageId],
+          );
+          useEffect(
+            () =>
+              selectionHub.register({
+                element: () => element.current,
+                body: () => bodyRef.current,
+                notify: setSelection,
+              }),
+            [sessionId, messageId],
+          );
+          if (
+            !config.enabled ||
+            !config.dshEnabled ||
+            !config.playbackEnabled ||
+            !bodyRef.current
+          )
+            return null;
           return h("span", {
             className: "elv-reply",
+            ref: element,
             children: [
               h("button", {
                 className: "elv-button",
                 title: "仅朗读这条回答正文",
-                onClick: () => void play(body, sessionId),
+                onClick: () => void play(bodyRef.current, sessionId),
                 children: "▶ 朗读",
               }),
               selection &&
                 h("button", {
                   className: "elv-button",
                   onPointerDown: (e) => e.preventDefault(),
-                  onClick: (e) => {
-                    const text = selected(body, e.currentTarget);
+                  onClick: () => {
+                    const text = selectedBody(
+                      bodyRef.current,
+                      element.current,
+                      window.getSelection(),
+                    );
                     if (text) void play(text, sessionId, "选中内容");
-                    else
-                      update({
-                        error: "请只选中这条回答的正文；推理与工具输出不能朗读",
-                      });
+                    else setSelection("");
                   },
                   children: "朗读选中内容",
                 }),
@@ -666,6 +737,11 @@ window.__ModuleLoader__.load({
                       },
                       children: p.paused ? "继续" : "暂停",
                     }),
+                    h("progress", {
+                      max: 1,
+                      value: p.progress,
+                      "aria-label": "整体播放进度",
+                    }),
                     h("button", { onClick: stopPlayback, children: "停止" }),
                     h("button", {
                       disabled: p.loading,
@@ -677,7 +753,8 @@ window.__ModuleLoader__.load({
                       min: 0,
                       max: 1,
                       step: 0.01,
-                      value: p.progress,
+                      value: p.segmentProgress,
+                      title: "当前段进度；总体进度见上方",
                       onChange: (e) => {
                         if (Number.isFinite(p.audio.duration))
                           p.audio.currentTime =
@@ -725,10 +802,16 @@ window.__ModuleLoader__.load({
         function Settings() {
           const s = useStore(),
             [draft, setDraft] = useState(s.config),
+            [keytermsText, setKeytermsText] = useState(
+              s.config?.keyterms.join("\n") || "",
+            ),
             [message, setMessage] = useState(""),
             [busy, setBusy] = useState(false),
             [testText, setTestText] = useState("你好，这是一条语音试听。");
-          useEffect(() => setDraft(s.config), [s.config]);
+          useEffect(() => {
+            setDraft(s.config);
+            setKeytermsText(s.config?.keyterms.join("\n") || "");
+          }, [s.config]);
           if (!draft) return h("div", { children: "正在读取语音设置…" });
           const set = (key, value) => setDraft({ ...draft, [key]: value });
           const field = (label, key, type = "text") =>
@@ -794,7 +877,11 @@ window.__ModuleLoader__.load({
           async function save() {
             setBusy(true);
             try {
-              await request("/config", draft, { method: "PUT" });
+              await request(
+                "/config",
+                { ...draft, keyterms: parseKeyterms(keytermsText) },
+                { method: "PUT" },
+              );
               await refresh();
               setMessage("已保存，即时生效");
               return true;
@@ -859,12 +946,8 @@ window.__ModuleLoader__.load({
                       h("span", { children: "关键词（每行一个）" }),
                       h("textarea", {
                         rows: 5,
-                        value: draft.keyterms.join("\n"),
-                        onChange: (e) =>
-                          set(
-                            "keyterms",
-                            e.target.value.split("\n").filter((x) => x.trim()),
-                          ),
+                        value: keytermsText,
+                        onChange: (e) => setKeytermsText(e.target.value),
                       }),
                     ],
                   }),
@@ -1017,7 +1100,8 @@ window.__ModuleLoader__.load({
           clearInterval(timer);
           disable();
           style.remove();
-          listeners.clear();
+          store.clear();
+          selectionHub.clear();
         });
       },
     };

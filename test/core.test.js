@@ -279,3 +279,92 @@ test("upload body size bounded", async () => {
     (e) => e.status === 413,
   );
 });
+test("precise provider tags take precedence over HTTP status", () => {
+  for (const http of [400, 401, 403, 429]) {
+    assert.equal(
+      providerError(http, { detail: { status: "quota_exceeded" } }).kind,
+      "quota",
+    );
+    assert.equal(
+      providerError(http, {
+        detail: { status: "max_character_limit_exceeded" },
+      }).kind,
+      "text_size",
+    );
+    assert.equal(
+      providerError(http, { detail: { status: "voice_not_found" } }).kind,
+      "voice_not_found",
+    );
+    assert.equal(
+      providerError(http, { detail: { status: "invalid_api_key" } }).kind,
+      "invalid_key",
+    );
+  }
+  assert.notEqual(
+    providerError(400, { detail: { status: "some_limit_exceeded" } }).kind,
+    "quota",
+  );
+});
+test("ordinary config saves preserve inflight STT; disabling TTS cancels only TTS", async () => {
+  let c = config();
+  const core = new VoiceCore({
+    config: () => c,
+    key: () => "x",
+    fetch: async (_url, init) =>
+      new Promise((_, reject) =>
+        init.signal.addEventListener("abort", () => reject(Error("aborted"))),
+      ),
+  });
+  const stt = core.transcribe(Buffer.from("fake"), "audio/wav"),
+    tts = core.synthesize("你好");
+  const both = Promise.allSettled([stt, tts]);
+  assert.equal(core.pending.size, 2);
+  const next = { ...c, keyterms: ["file.txt"] };
+  core.configurationChanged(c, next);
+  c = next;
+  assert.ok([...core.pending.keys()].every((x) => !x.signal.aborted));
+  const off = { ...c, playbackEnabled: false };
+  core.configurationChanged(c, off);
+  c = off;
+  assert.equal(
+    [...core.pending.entries()].find(([, feature]) => feature === "stt")[0]
+      .signal.aborted,
+    false,
+  );
+  assert.equal(
+    [...core.pending.entries()].find(([, feature]) => feature === "tts")[0]
+      .signal.aborted,
+    true,
+  );
+  await core.close();
+  assert.ok((await both).every((r) => r.status === "rejected"));
+});
+test("stitching fields are bounded and v3 skips unsupported context", async () => {
+  let sent;
+  let c = config();
+  const core = new VoiceCore({
+    config: () => c,
+    key: () => "x",
+    fetch: async (_url, init) => {
+      sent = JSON.parse(init.body);
+      return new Response("mp3");
+    },
+  });
+  await core.synthesize("第二段", undefined, {
+    previous_request_ids: ["request-one"],
+    previous_text: "第一段",
+    next_text: "第三段",
+  });
+  assert.deepEqual(sent.previous_request_ids, ["request-one"]);
+  assert.equal(sent.next_text, "第三段");
+  await assert.rejects(
+    core.synthesize("第二段", undefined, {
+      previous_request_ids: Array(4).fill("x"),
+    }),
+    (e) => e.kind === "stitching",
+  );
+  c = { ...c, ttsModel: "eleven_v3" };
+  await core.synthesize("第二段", undefined, { previous_text: "第一段" });
+  assert.equal(sent.previous_text, undefined);
+  await core.close();
+});

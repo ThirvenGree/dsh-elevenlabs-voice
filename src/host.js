@@ -106,8 +106,9 @@ export function apply(ctx) {
             );
             fs.writeFileSync(file + ".tmp", JSON.stringify(next, null, 2));
             fs.renameSync(file + ".tmp", file);
+            const before = config;
             config = next;
-            core.abort();
+            core.configurationChanged(before, next);
             return json(res, 200, { ok: true, config });
           }
           if (req.method !== "POST")
@@ -130,10 +131,14 @@ export function apply(ctx) {
               });
             }
             if (route === "/tts") {
-              const { text } = JSON.parse(
+              const { text, stitching } = JSON.parse(
                 (await readBody(req, 65536)).toString(),
               );
-              const result = await core.synthesize(text, controller.signal);
+              const result = await core.synthesize(
+                text,
+                controller.signal,
+                stitching,
+              );
               res.writeHead(200, {
                 "content-type": "audio/mpeg",
                 "cache-control": "no-store",
@@ -160,20 +165,6 @@ export function apply(ctx) {
       },
     }),
   );
-  // Native registry is optional. Custom UI uses the same core because it must capture
-  // the caret at transcription completion rather than at recording start.
-  ctx.inject(["speechToText"], (scope) =>
-    scope.effect(() =>
-      scope.speechToText.register({
-        info: {
-          id: "elevenlabs-voice",
-          name: "ElevenLabs Scribe",
-          languages: ["auto", "zh", "en"],
-        },
-        async transcribe({ audio }, signal) {
-          return core.transcribe(audio, "audio/wav", signal);
-        },
-      }),
-    ),
-  );
+  // Deliberately no native Speech Provider registration: only our composer entry
+  // owns V1.4 completion-caret and cross-session routing semantics.
 }
