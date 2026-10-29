@@ -1050,10 +1050,10 @@ window.__ModuleLoader__.load({
               }),
               h("section", {
                 children: [
-                  h("h3", { children: "Pet Voice · 接口预留" }),
+                  h("h3", { children: "Pet Voice · 实时对话" }),
                   h("p", {
                     children:
-                      "本阶段未启用实时语音、唤醒词或桌宠麦克风。现有 Pet 人设、记忆及工具设置保持有效。",
+                      "从桌宠右键菜单或桌宠设置进入「语音对话」。支持实时语音、打断和直接朗读；跟随 DSH 当前模型，并共用已启用的人设、生活和记忆。麦克风只在点击开始后启用。",
                   }),
                 ],
               }),

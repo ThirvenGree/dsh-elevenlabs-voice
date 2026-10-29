@@ -4,6 +4,7 @@ import os from "node:os";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { defaults, validateConfig } from "./shared.js";
 import { VoiceCore, VoiceError } from "./core.js";
+import { PetVoiceHost } from "./pet-host.js";
 export const name = "elevenlabs-voice";
 export const inject = ["webServer"];
 export function guard(req, token) {
@@ -65,6 +66,10 @@ export function apply(ctx) {
   const core = new VoiceCore({ config: () => config }),
     token = randomBytes(32).toString("hex");
   let active = 0;
+  const petVoice = new PetVoiceHost(ctx, dir, () => config);
+  ctx.provide("elevenlabsPetVoice", {
+    panel: (petId) => petVoice.panel(petId),
+  });
   const json = (res, status, value) => {
     res.writeHead(status, {
       "content-type": "application/json; charset=utf-8",
@@ -74,6 +79,7 @@ export function apply(ctx) {
   };
   ctx.effect(() => () => {
     void core.close();
+    void petVoice.close();
   });
   ctx.effect(() =>
     ctx.webServer.register({
@@ -98,7 +104,7 @@ export function apply(ctx) {
               keyPresent: Boolean(process.env.ELEVENLABS_API_KEY),
               csrfToken: token,
               receipts: core.receipts,
-              capabilities: { petVoice: false, phase: 1 },
+              capabilities: { petVoice: true, phase: 2 },
             });
           if (route === "/config" && req.method === "PUT") {
             const next = validateConfig(
@@ -109,6 +115,7 @@ export function apply(ctx) {
             const before = config;
             config = next;
             core.configurationChanged(before, next);
+            petVoice.configurationChanged();
             return json(res, 200, { ok: true, config });
           }
           if (req.method !== "POST")

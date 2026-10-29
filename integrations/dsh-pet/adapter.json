@@ -1,0 +1,164 @@
+{
+  "protocol": 1,
+  "package": "dsh-pet",
+  "baselineVersion": "0.3.8",
+  "files": [
+    {
+      "file": "src/host/index.ts",
+      "edits": [
+        {
+          "before": "import { generateChat, type ChatMemoryMessage } from './chat';\nimport { configuredModel, currentModel } from './model-selection';\nimport { limitPool, pickMeme, readMemePool } from './memes';\nimport {\n  decideBroadcast,\n  decideBubbleClear,\n",
+          "after": "import { generateChat, type ChatMemoryMessage } from './chat';\nimport { configuredModel, currentModel } from './model-selection';\nimport { limitPool, pickMeme, readMemePool } from './memes';\nimport { streamVoiceReply } from './voice-stream';\nimport {\n  decideBroadcast,\n  decideBubbleClear,\n"
+        },
+        {
+          "before": "   *  失败带回真实 reason（含 unknown-pet），成功带回生成的文本——调用方不必再拉一拍 /state。 */\n  const publishWhisper = async (\n    petId: string,\n  ): Promise<\n    | { ok: true; text: string; image?: string }\n    | { ok: false; reason: 'provider-missing' | 'generate-error' | 'unknown-pet'; message?: string }\n",
+          "after": "   *  失败带回真实 reason（含 unknown-pet），成功带回生成的文本——调用方不必再拉一拍 /state。 */\n  const publishWhisper = async (\n    petId: string,\n    automatic = false,\n  ): Promise<\n    | { ok: true; text: string; image?: string }\n    | { ok: false; reason: 'provider-missing' | 'generate-error' | 'unknown-pet'; message?: string }\n"
+        },
+        {
+          "before": "      // provider-missing 就会在边界被吞掉（API.md 描述的降级 reason 正是它）。\n      return result;\n    }\n    state.writePet(petId, 'say', result.image ? { text: result.text, image: result.image } : { text: result.text });\n    // 成功也留一行：否则 logs.txt 里「没触发」与「触发了并且成功」无法区分。\n    log.info(\n      `[dsh-pet] 碎碎念生成成功 pet=${petId}，${result.text.length} 字` +\n",
+          "after": "      // provider-missing 就会在边界被吞掉（API.md 描述的降级 reason 正是它）。\n      return result;\n    }\n    state.writePet(petId, 'say', { text: result.text, ...(result.image ? {image: result.image} : {}), automatic });\n    // 成功也留一行：否则 logs.txt 里「没触发」与「触发了并且成功」无法区分。\n    log.info(\n      `[dsh-pet] 碎碎念生成成功 pet=${petId}，${result.text.length} 字` +\n"
+        },
+        {
+          "before": "\n  /** 当前生效宠物列表：成品配置拍平（合并器已保证 id 唯一、字段填满），命令与桌面模式共用。 */\n  const effectivePetList = (): Record<string, unknown>[] => flattenPetList(readAllConfig(configPaths));\n\n  /** 余额刷新周期（秒）：成品 main 条目的 eventsRefreshSec.balance（合并器已填默认；非法兜底 1800） */\n  const balancePeriodSec = (cfg: Record<string, Record<string, unknown>>): number => {\n",
+          "after": "\n  /** 当前生效宠物列表：成品配置拍平（合并器已保证 id 唯一、字段填满），命令与桌面模式共用。 */\n  const effectivePetList = (): Record<string, unknown>[] => flattenPetList(readAllConfig(configPaths));\n\n  // 统一语音服务只获得桌宠自己的历史和纯模型流，不获得 Agent 的工具执行权。\n  const voiceLocks = new Map<string, string>();\n  ctx.provide('petVoiceBridge7340', {\n    list: () => effectivePetList().map(p => ({ id: p.id, name: p.name })),\n    describe: (petId: string) => {\n      const found = findPetInstance(readAllConfig(configPaths), petId);\n      if (!found) throw new Error('桌宠不存在');\n      return { model: ctx.agentDefaultModel.currentSelection(), shared: found.conf.sharedDshContextEnabled === true };\n    },\n    history: async (petId: string) => {\n      const found = findPetInstance(readAllConfig(configPaths), petId);\n      if (!found) throw new Error('桌宠不存在');\n      return (await readMemory())[found.entry]?.[petId]?.messages ?? [];\n    },\n    clear: (petId: string) => withMemoryLock(async () => {\n      const found = findPetInstance(readAllConfig(configPaths), petId);\n      if (!found) throw new Error('桌宠不存在');\n      const mem = await readMemory();\n      if (mem[found.entry]) delete mem[found.entry][petId];\n      await writeMemory(mem);\n    }),\n    stream: async function* (petId: string, text: string, signal: AbortSignal, override?: { provider: string; model: string }) {\n      const found = findPetInstance(readAllConfig(configPaths), petId);\n      if (!found) throw new Error('桌宠不存在');\n      const model = override || ctx.agentDefaultModel.currentSelection();\n      const mem = await readMemory();\n      const history = sliceMemoryRounds(mem[found.entry]?.[petId]?.messages ?? [], memoryRounds(found.conf));\n      if (found.conf.sharedDshContextEnabled === true) {\n        try { sharedServices().life?.observe({ sessionId: String(found.conf.sharedDshSessionId || ''), text, petId }); }\n        catch (error) { log.warn('[dsh-pet] 语音记忆入队失败：' + String(error)); }\n      }\n      // 用户原话先保存；被打断的未播完回答不会冒充完整历史。\n      await withMemoryLock(async () => {\n        const current = await readMemory();\n        current[found.entry] ??= {};\n        current[found.entry][petId] ??= { messages: [] };\n        current[found.entry][petId].messages.push({ role: 'user', content: text, ts: Date.now() });\n        await writeMemory(current);\n      });\n      let reply = '';\n      const system = petSystemPrompt(found) + '\\n本次为桌宠语音对话，可提议计时器或打开公开网页。只有用户明确请求时，回复末尾可添加一段 <pet-task>{\"type\":\"timer\",\"seconds\":60,\"label\":\"提醒\"}</pet-task> 或 <pet-task>{\"type\":\"url\",\"url\":\"https://example.com\"}</pet-task>。这只是待确认提议，未执行前不得声称已完成。复杂操作交回 DSH。';\n      for await (const delta of streamVoiceReply(ctx.llm, model, system, history, text, signal)) {\n        reply += delta;\n        yield delta;\n      }\n      signal.throwIfAborted();\n      reply = reply.replace(/<pet-task>[\\s\\S]*?(?:<\\/pet-task>|$)/g, '').trim();\n      if (!reply.trim()) throw new Error('模型没有返回正文');\n      await withMemoryLock(async () => {\n        const current = await readMemory();\n        const entry = current[found.entry]?.[petId];\n        if (entry) {\n          entry.messages.push({ role: 'assistant', content: reply, ts: Date.now() });\n          entry.messages = entry.messages.slice(-200);\n          await writeMemory(current);\n        }\n      });\n      state.writePet(petId, 'say', { text: reply, voiceProduced: true });\n    },\n    say: (petId: string, text: string) => state.writePet(petId, 'say', { text, voiceProduced: true }),\n    events: () => Object.entries(state.read().pets).map(([petId, leaves]) => ({ petId, ...leaves.say })),\n    speaking: (petId: string, active: boolean) => {\n      const lockId = voiceLocks.get(petId);\n      if (!active) {\n        if (lockId) lock.release({ petId, lockId });\n        voiceLocks.delete(petId);\n        return;\n      }\n      const result = lock.acquire({ petId, ...(lockId ? { lockId } : {}), ttl: 15000 });\n      if (result.ok) voiceLocks.set(petId, result.lockId);\n    },\n  });\n\n  /** 余额刷新周期（秒）：成品 main 条目的 eventsRefreshSec.balance（合并器已填默认；非法兜底 1800） */\n  const balancePeriodSec = (cfg: Record<string, Record<string, unknown>>): number => {\n"
+        },
+        {
+          "before": "    body?: string,\n    signal?: AbortSignal,\n  ): Promise<RouteResult> => {\n    // 成品配置：/dsh-pet-7340/config（GET 读取合并成品 / PUT 保存用户层 / POST 同步内置默认）\n    if (rest === 'config') {\n      if (method === 'GET') {\n",
+          "after": "    body?: string,\n    signal?: AbortSignal,\n  ): Promise<RouteResult> => {\n    if (rest === 'voice-panel' && method === 'POST') {\n      try {\n        const petId = url.searchParams.get('pet') || 'main';\n        if (!findPetInstance(readAllConfig(configPaths), petId)) throw new Error('桌宠不存在');\n        const service = ctx.get?.('elevenlabsPetVoice');\n        if (!service) throw new Error('请启用统一 ElevenLabs 语音插件');\n        return { kind: 'json', status: 200, obj: await service.panel(petId) };\n      } catch (error) {\n        return { kind: 'json', status: 503, obj: { error: String(error) } };\n      }\n    }\n    // 成品配置：/dsh-pet-7340/config（GET 读取合并成品 / PUT 保存用户层 / POST 同步内置默认）\n    if (rest === 'config') {\n      if (method === 'GET') {\n"
+        },
+        {
+          "before": "          log.info(`[dsh-pet] 碎碎念到点 pet=${petId}（周期 ${sec}s），开始生成`);\n          lastWhisperAt.set(petId, now);\n          // 不 await：生成要几秒，别把调度拍拖住（每只宠物独立生成，互不阻塞）\n          void publishWhisper(petId).catch(() => {});\n        }\n        if (Number.isFinite(min)) next = min;\n        // 每拍一行汇总：调度是否还在跑、下一拍多久、为什么跳过，全在这一行里（300s 一条，量可忽略）\n",
+          "after": "          log.info(`[dsh-pet] 碎碎念到点 pet=${petId}（周期 ${sec}s），开始生成`);\n          lastWhisperAt.set(petId, now);\n          // 不 await：生成要几秒，别把调度拍拖住（每只宠物独立生成，互不阻塞）\n          void publishWhisper(petId, true).catch(() => {});\n        }\n        if (Number.isFinite(min)) next = min;\n        // 每拍一行汇总：调度是否还在跑、下一拍多久、为什么跳过，全在这一行里（300s 一条，量可忽略）\n"
+        }
+      ]
+    },
+    {
+      "file": "src/client/pet.ts",
+      "edits": [
+        {
+          "before": " * 必须始终成立：/state 是唯一数据源，动画与气泡都由叶子里的序号变化驱动。\n * @module dsh-pet/src/client/pet\n */\nimport {\n  pick,\n  rollKind,\n",
+          "after": " * 必须始终成立：/state 是唯一数据源，动画与气泡都由叶子里的序号变化驱动。\n * @module dsh-pet/src/client/pet\n */\nimport { mountVoicePanel } from '../shared/voice-panel';\nimport {\n  pick,\n  rollKind,\n"
+        },
+        {
+          "before": "    // 卸载时关闭可能开着的右键菜单与对话弹窗。\n    useEffect(\n      () => () => {\n        if (menuRef.current) {\n          menuRef.current.close();\n          menuRef.current = null;\n",
+          "after": "    // 卸载时关闭可能开着的右键菜单与对话弹窗。\n    useEffect(\n      () => () => {\n        const voicePanel = document.getElementById('dsh-pet-voice-panel');\n        if (voicePanel?.dataset.petId === cfg.id) voicePanel.remove();\n        if (menuRef.current) {\n          menuRef.current.close();\n          menuRef.current = null;\n"
+        },
+        {
+          "before": "          chatRef.current = null;\n        }\n      },\n      [],\n    );\n    // 余额事件：按档位播事件动画并弹气泡。手动请求无条件弹，自动轮询要求开启且有百分比；\n    // 档位动画始终只属于启用余额的宠物。\n",
+          "after": "          chatRef.current = null;\n        }\n      },\n      [cfg.id],\n    );\n    // 余额事件：按档位播事件动画并弹气泡。手动请求无条件弹，自动轮询要求开启且有百分比；\n    // 档位动画始终只属于启用余额的宠物。\n"
+        },
+        {
+          "before": "        // 只读项：好感度已经在菜单文案里了，点它不做任何事（也不关菜单之外的副作用）。\n        return;\n      }\n      if (leaf.action === 'chat') {\n        // 对话：shared 组件，记忆经 host /chat 读写，浏览器与桌面共用。\n        // 弹窗贴在身体命中区右上角，视频框右上角不等于宠物右上角；超出视口夹回。\n",
+          "after": "        // 只读项：好感度已经在菜单文案里了，点它不做任何事（也不关菜单之外的副作用）。\n        return;\n      }\n      if (leaf.action === 'voice') {\n        void mountVoicePanel(cfg.id, '/dsh-pet-7340').catch(error => { setWhisperText(String(error)); setWhisperBubbleOn(true); });\n        return;\n      }\n      if (leaf.action === 'chat') {\n        // 对话：shared 组件，记忆经 host /chat 读写，浏览器与桌面共用。\n        // 弹窗贴在身体命中区右上角，视频框右上角不等于宠物右上角；超出视口夹回。\n"
+        },
+        {
+          "before": "            { label: '糖', action: 'feed', feed: 'candy' },\n          ],\n        },\n        { label: '对话', action: 'chat' },\n        { label: '回到初始位置', action: 'home' },\n        // 显示位置子菜单与桌面端同一份；改成不含 web 的值后本宠物会从页面消失。\n        displayMenuBranch(),\n",
+          "after": "            { label: '糖', action: 'feed', feed: 'candy' },\n          ],\n        },\n        { label: '语音对话', action: 'voice' },\n          { label: '对话', action: 'chat' },\n        { label: '回到初始位置', action: 'home' },\n        // 显示位置子菜单与桌面端同一份；改成不含 web 的值后本宠物会从页面消失。\n        displayMenuBranch(),\n"
+        }
+      ]
+    },
+    {
+      "file": "src/shared/menu.ts",
+      "edits": [
+        {
+          "before": "    | 'show-balance'\n    | 'whisper'\n    | 'chat'\n    | 'home'\n    | 'reload'\n    | 'set-display'\n",
+          "after": "    | 'show-balance'\n    | 'whisper'\n    | 'chat'\n    | 'voice'\n    | 'home'\n    | 'reload'\n    | 'set-display'\n"
+        }
+      ]
+    },
+    {
+      "file": "src/shared/index.ts",
+      "edits": [
+        {
+          "before": "export * from './snap';\nexport * from './quiet-hours';\nexport * from './greet';\n",
+          "after": "export * from './snap';\nexport * from './quiet-hours';\nexport * from './greet';\n\nexport * from './voice-panel';\n"
+        }
+      ]
+    },
+    {
+      "file": "runtime/electron-helper/sprite.js",
+      "edits": [
+        {
+          "before": "    // 级联菜单新增面板、聊天输入增长都可能在鼠标停住时发生，不能只等下一次 mousemove。\n    this.inputRegionResize = new ResizeObserver(() => this.syncInputRegions());\n    this.inputRegionElements = new Set();\n    this.inputRegionMutation = new MutationObserver(() => this.syncInputRegions());\n    this.inputRegionMutation.observe(document.body, { childList: true, subtree: true });\n    this.hit.addEventListener('pointerdown', (e) => this.onPointerDown(e), { signal: ac.signal });\n    this.hit.addEventListener('pointermove', (e) => this.onPointerMove(e), { signal: ac.signal });\n",
+          "after": "    // 级联菜单新增面板、聊天输入增长都可能在鼠标停住时发生，不能只等下一次 mousemove。\n    this.inputRegionResize = new ResizeObserver(() => this.syncInputRegions());\n    this.inputRegionElements = new Set();\n    this.inputRegionMutation = new MutationObserver(() => this.syncInputBusy());\n    this.inputRegionMutation.observe(document.body, { childList: true, subtree: true });\n    this.hit.addEventListener('pointerdown', (e) => this.onPointerDown(e), { signal: ac.signal });\n    this.hit.addEventListener('pointermove', (e) => this.onPointerMove(e), { signal: ac.signal });\n"
+        },
+        {
+          "before": "  }\n\n  dispose() {\n    this.disposeDesktopFeatures();\n    this.ac.abort();\n    this.inputRegionMutation.disconnect();\n",
+          "after": "  }\n\n  dispose() {\n    const voicePanel = document.getElementById('dsh-pet-voice-panel');\n    if (voicePanel?.dataset.petId === this.pet.id) voicePanel.remove();\n    this.disposeDesktopFeatures();\n    this.ac.abort();\n    this.inputRegionMutation.disconnect();\n"
+        },
+        {
+          "before": "  inputBusy() {\n    // 可点的余额气泡是第四个来源：它长在窗口里、靠窗口级 click 触发，却悬在平时穿透的余量区，\n    // 正需要借 busy + 控件矩形把它圈出来。\n    return this.dragState.active || this.menuOpen || this.chatOpen || this.balanceClickable();\n  }\n\n  /** 余额气泡当前有几页：custom 取 views.length；内置 windows 是收起/展开两页；其余一页。 */\n",
+          "after": "  inputBusy() {\n    // 可点的余额气泡是第四个来源：它长在窗口里、靠窗口级 click 触发，却悬在平时穿透的余量区，\n    // 正需要借 busy + 控件矩形把它圈出来。\n    return this.dragState.active || this.menuOpen || this.chatOpen || !!document.getElementById('dsh-pet-voice-panel') || this.balanceClickable();\n  }\n\n  /** 余额气泡当前有几页：custom 取 views.length；内置 windows 是收起/展开两页；其余一页。 */\n"
+        },
+        {
+          "before": "    if (!window.petBridge || !window.petBridge.setInputRegions) return;\n    const rects = [];\n    // 控件矩形 = 主进程允许接收点击的区域，矩形外继续穿透。可点的余额气泡悬在余量区，不登记就点不到。\n    const controls = [...document.querySelectorAll('.dsh-pet-menu-column, .dsh-pet-chat, .pet-bubble.is-clickable')];\n    for (const el of this.inputRegionElements) {\n      if (!controls.includes(el)) {\n        this.inputRegionResize.unobserve(el);\n",
+          "after": "    if (!window.petBridge || !window.petBridge.setInputRegions) return;\n    const rects = [];\n    // 控件矩形 = 主进程允许接收点击的区域，矩形外继续穿透。可点的余额气泡悬在余量区，不登记就点不到。\n    const controls = [...document.querySelectorAll('.dsh-pet-menu-column, .dsh-pet-chat, #dsh-pet-voice-panel, .pet-bubble.is-clickable')];\n    for (const el of this.inputRegionElements) {\n      if (!controls.includes(el)) {\n        this.inputRegionResize.unobserve(el);\n"
+        },
+        {
+          "before": "      return;\n    }\n    // 右键菜单/对话弹窗开启：整窗保持可交互，关闭后恢复命中区判定\n    if (this.menuOpen || this.chatOpen) {\n      this.syncInputRegions(); // 级联菜单按悬停增减面板，及时更新占用区域\n      this.setInteractive(true);\n      this.setTip(false); // 菜单/弹窗期间提示让位，不跟浮层抢注意力\n",
+          "after": "      return;\n    }\n    // 右键菜单/对话弹窗开启：整窗保持可交互，关闭后恢复命中区判定\n    if (this.menuOpen || this.chatOpen || document.getElementById('dsh-pet-voice-panel')) {\n      this.syncInputRegions(); // 级联菜单按悬停增减面板，及时更新占用区域\n      this.setInteractive(true);\n      this.setTip(false); // 菜单/弹窗期间提示让位，不跟浮层抢注意力\n"
+        },
+        {
+          "before": "    tools.push(\n      { label: '碎碎念', action: 'whisper' },\n      ...this.desktopFeatureMenu(),\n      { label: '对话', action: 'chat' },\n      { label: '回到初始位置', action: 'home' },\n      // 显示位置（仅网页/仅桌面/两者/都不）：改这只宠物的 display 配置，由宿主重载生效。\n",
+          "after": "    tools.push(\n      { label: '碎碎念', action: 'whisper' },\n      ...this.desktopFeatureMenu(),\n      { label: '语音对话', action: 'voice' },\n      { label: '对话', action: 'chat' },\n      { label: '回到初始位置', action: 'home' },\n      // 显示位置（仅网页/仅桌面/两者/都不）：改这只宠物的 display 配置，由宿主重载生效。\n"
+        },
+        {
+          "before": "      return;\n    }\n    if (leaf.action === 'show-affinity') return;\n    if (leaf.action === 'chat') {\n      this.showChatFromMenu(); // 打开对话弹窗（记忆经 host /chat 读写，浏览器/桌面同一实例共享）\n      return;\n",
+          "after": "      return;\n    }\n    if (leaf.action === 'show-affinity') return;\n    if (leaf.action === 'voice') {\n      void S.mountVoicePanel(this.pet.id, BASE).catch(error => this.showWhisper(String(error)));\n      return;\n    }\n    if (leaf.action === 'chat') {\n      this.showChatFromMenu(); // 打开对话弹窗（记忆经 host /chat 读写，浏览器/桌面同一实例共享）\n      return;\n"
+        }
+      ]
+    },
+    {
+      "file": "src/client/settings.ts",
+      "edits": [
+        {
+          "before": " * 样式对齐官方设置页：max-width 720px，全部走 `--dsw-alias-*` 语义 token。\n * @module dsh-pet/src/client/settings\n */\nimport { PET_DISPLAYS } from '../shared/config';\nimport { DEFAULT_FONT, FONT_PRESETS, FONT_SIZE_MAX, FONT_SIZE_MIN } from '../shared/fonts';\nimport { DEFAULT_PHYSICS } from '../shared/physics';\n",
+          "after": " * 样式对齐官方设置页：max-width 720px，全部走 `--dsw-alias-*` 语义 token。\n * @module dsh-pet/src/client/settings\n */\nimport { mountVoicePanel } from '../shared/voice-panel';\nimport { PET_DISPLAYS } from '../shared/config';\nimport { DEFAULT_FONT, FONT_PRESETS, FONT_SIZE_MAX, FONT_SIZE_MIN } from '../shared/fonts';\nimport { DEFAULT_PHYSICS } from '../shared/physics';\n"
+        },
+        {
+          "before": "              ],\n            }),\n            h('p', {className:'dsh-pet-cfg__note',children:t('sharedStatusLabel')+'：'+sharedStatus}),\n            field(t('sharedDshSessionLabel'), h('input', {className: inputClass, value: sharedDshSession, disabled:busy || !sharedDshContext, placeholder:'session-...', onChange:(e:ChangeEvent<HTMLInputElement>)=>setSharedDshSession(e.target.value)}), t('sharedDshSessionHint')),\n            // 安静时段是个时间段而不是开关，单独一行占满宽度——塞进 grid4 会被压成看不清的窄条。\n            h('div', {\n",
+          "after": "              ],\n            }),\n            h('p', {className:'dsh-pet-cfg__note',children:t('sharedStatusLabel')+'：'+sharedStatus}),\n            h('button', {type:'button',onClick:()=>{void mountVoicePanel(selId, '/dsh-pet-7340').catch(error=>setSharedStatus(String(error)));},children:'语音与实时对话设置'}),\n            field(t('sharedDshSessionLabel'), h('input', {className: inputClass, value: sharedDshSession, disabled:busy || !sharedDshContext, placeholder:'session-...', onChange:(e:ChangeEvent<HTMLInputElement>)=>setSharedDshSession(e.target.value)}), t('sharedDshSessionHint')),\n            // 安静时段是个时间段而不是开关，单独一行占满宽度——塞进 grid4 会被压成看不清的窄条。\n            h('div', {\n"
+        }
+      ]
+    },
+    {
+      "file": "../API.md",
+      "edits": [
+        {
+          "before": "### GET /dsh-pet-7340/shared-context?pet=main&surface=any\n\n共享上下文状态，只返回启用状态、当前角色、绑定会话、记忆条数/来源和安静标记，不返回完整人设或私密记忆正文。错误时返回 `{ok:false,enabled:true,message}`。网页与桌面 Helper 使用相同宿主实现。\n",
+          "after": "### GET /dsh-pet-7340/shared-context?pet=main&surface=any\n\n共享上下文状态，只返回启用状态、当前角色、绑定会话、记忆条数/来源和安静标记，不返回完整人设或私密记忆正文。错误时返回 `{ok:false,enabled:true,message}`。网页与桌面 Helper 使用相同宿主实现。\n\n\n## 统一桌宠语音\nPOST `/dsh-pet-7340/voice-panel?pet=main` 返回统一 ElevenLabs 插件的本机面板。浏览器和桌面右键菜单、设置页均可进入；语音配置由统一语音插件保存。当前 DSH 模型、人设、生活心情和记忆共享链路动态读取。停止语音会释放本次占用锁，不影响其他插件。\n"
+        }
+      ]
+    },
+    {
+      "file": "../CONFIG.md",
+      "edits": [
+        {
+          "before": "`sharedDshContextEnabled`（默认 false）开启后，每次生成读取全局 cosplay 与生活插件 `cenShuLifeShared` 服务，替代独立 `whisperPrompt`，挂件显示名不改变角色身份。`sharedDshSessionId` 留空使用生活首个绑定会话，或填写已绑定的 `session-...`。不拼装或唤醒 QQ 回合，不自动向 QQ 发送。聊天、碎碎念、页面查看共用此上下文。读取失败或角色不符会报告错误。\n\n短期 `memory.json` 仍用于桌宠对话连续性；长期事实读取原记忆链的当前有效证据。真实桌宠来信进入已有 Gemini 重要记忆审核与写回队列，助手回复、碎碎念和截图不作为用户事实。共享模式停用任意最近活跃会话摘要，避免串入其他工作区内容；自动碎碎念遵循共享 02:00–06:00 安静时段，手动对话照常。独立模式的夜间变暗设置仍只控制外观。\n",
+          "after": "`sharedDshContextEnabled`（默认 false）开启后，每次生成读取全局 cosplay 与生活插件 `cenShuLifeShared` 服务，替代独立 `whisperPrompt`，挂件显示名不改变角色身份。`sharedDshSessionId` 留空使用生活首个绑定会话，或填写已绑定的 `session-...`。不拼装或唤醒 QQ 回合，不自动向 QQ 发送。聊天、碎碎念、页面查看共用此上下文。读取失败或角色不符会报告错误。\n\n短期 `memory.json` 仍用于桌宠对话连续性；长期事实读取原记忆链的当前有效证据。真实桌宠来信进入已有 Gemini 重要记忆审核与写回队列，助手回复、碎碎念和截图不作为用户事实。共享模式停用任意最近活跃会话摘要，避免串入其他工作区内容；自动碎碎念遵循共享 02:00–06:00 安静时段，手动对话照常。独立模式的夜间变暗设置仍只控制外观。\n\n\n## 统一桌宠语音\nPOST `/dsh-pet-7340/voice-panel?pet=main` 返回统一 ElevenLabs 插件的本机面板。浏览器和桌面右键菜单、设置页均可进入；语音配置由统一语音插件保存。当前 DSH 模型、人设、生活心情和记忆共享链路动态读取。停止语音会释放本次占用锁，不影响其他插件。\n"
+        }
+      ]
+    },
+    {
+      "file": "../openapi.yaml",
+      "edits": [
+        {
+          "before": "    description: 字体、通知图标、表情包、动画素材\n\npaths:\n  /dsh-pet-7340/shared-context:\n    get:\n      tags: [State]\n",
+          "after": "    description: 字体、通知图标、表情包、动画素材\n\npaths:\n  /dsh-pet-7340/voice-panel:\n    post:\n      tags: [Action]\n      operationId: openPetVoicePanel\n      summary: 获取统一语音插件的本机桌宠面板\n      responses:\n        \"200\":\n          description: 返回仅本机可用的短期能力地址\n        \"503\":\n          description: 语音插件不可用\n  /dsh-pet-7340/shared-context:\n    get:\n      tags: [State]\n"
+        }
+      ]
+    },
+    {
+      "file": "src/host/voice-stream.ts",
+      "create": "/**\n * 桌宠实时对话的纯流适配：复用宿主 LLM，不启动 Agent、不执行工具。\n * 仅输出正文增量；取消及终止错误必须交还调用方，不能回落到另一个模型。\n * @module dsh-pet/src/host/voice-stream\n */\nimport { createAssistantMessage, createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm';\nimport type { ChatMemoryMessage } from './chat';\nimport { noTextReason } from './llm-call';\n\n/** 当前模型与可选推理等级。 */\nexport interface VoiceModel {\n  provider: string;\n  model: string;\n  reasoningEffort?: string;\n}\n/** 只依赖可取消的模型流。 */\nexport interface VoiceLlm {\n  stream(options: unknown): AsyncIterable<StreamChunk>;\n}\n/** 正文流；API 错误不会被当作空回答。 */\nexport async function* streamVoiceReply(\n  llm: VoiceLlm,\n  model: VoiceModel,\n  system: string,\n  history: ChatMemoryMessage[],\n  text: string,\n  signal: AbortSignal,\n): AsyncGenerator<string> {\n  signal.throwIfAborted();\n  const messages = [\n    ...history.map((m) =>\n      m.role === 'user'\n        ? createUserMessage({ content: [{ type: 'text', text: m.content }], source: { kind: 'user' } })\n        : createAssistantMessage({\n            content: [{ type: 'text', text: m.content }],\n            source: { provider: model.provider, model: model.model },\n          }),\n    ),\n    createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),\n  ];\n  for await (const chunk of llm.stream({ ...model, system, messages, sessionId: 'dsh-pet', signal })) {\n    signal.throwIfAborted();\n    if (chunk.type === 'text-delta' && chunk.text) yield chunk.text;\n    if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted'))\n      throw new Error(noTextReason(chunk.reason));\n  }\n}\n"
+    },
+    {
+      "file": "src/host/voice-stream.test.ts",
+      "create": "/** @module dsh-pet/src/host/voice-stream.test */\nimport test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { streamVoiceReply } from './voice-stream';\ntest('voice uses explicit DSH model, only emits text and propagates cancellation', async () => {\n  const control = new AbortController();\n  let selected: unknown;\n  const llm = {\n    async *stream(options: unknown) {\n      selected = options;\n      yield { type: 'reasoning-delta' as const, index: 0, text: 'hidden' };\n      yield { type: 'text-delta' as const, index: 1, text: '你好' };\n      control.abort();\n      yield { type: 'text-delta' as const, index: 1, text: 'late' };\n    },\n  };\n  const values: string[] = [];\n  await assert.rejects(async () => {\n    for await (const text of streamVoiceReply(\n      llm,\n      { provider: 'test', model: 'same-as-dsh' },\n      'persona',\n      [],\n      'hello',\n      control.signal,\n    ))\n      values.push(text);\n  });\n  assert.deepEqual(values, ['你好']);\n  assert.equal((selected as { model: string }).model, 'same-as-dsh');\n});\n"
+    },
+    {
+      "file": "src/shared/voice-panel.ts",
+      "create": "/**\n * 两端共用的语音面板：只嵌入统一语音服务，不创建第二个 Pet 或窗口。\n * 关闭时卸载 iframe，实时会话随页面退出释放。\n * @module dsh-pet/src/shared/voice-panel\n */\nexport async function mountVoicePanel(petId: string, base: string): Promise<void> {\n  const old = document.getElementById('dsh-pet-voice-panel');\n  old?.remove();\n  const response = await fetch(base + '/voice-panel?pet=' + encodeURIComponent(petId), { method: 'POST' });\n  const result: unknown = await response.json();\n  if (!result || typeof result !== 'object' || !('url' in result) || typeof result.url !== 'string')\n    throw new Error('统一语音插件尚未就绪');\n  const url = new URL(result.url);\n  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1') throw new Error('语音地址必须来自本机');\n  const root = document.createElement('div');\n  root.id = 'dsh-pet-voice-panel';\n  root.dataset.petId = petId;\n  root.style.cssText =\n    'position:fixed;right:8px;top:8px;width:min(390px,calc(100vw - 16px));height:min(540px,calc(100vh - 16px));z-index:2147483005;background:#f5f7fa;border-radius:16px;box-shadow:0 8px 35px #0004;overflow:hidden';\n  const close = document.createElement('button');\n  close.textContent = '×';\n  close.title = '关闭语音面板';\n  close.style.cssText =\n    'position:absolute;right:8px;top:5px;z-index:2;border:0;background:transparent;font-size:24px;cursor:pointer';\n  close.onclick = () => root.remove();\n  const frame = document.createElement('iframe');\n  frame.src = url.href;\n  frame.allow = 'microphone; autoplay';\n  frame.title = 'Pet 语音';\n  frame.style.cssText = 'width:100%;height:100%;border:0';\n  root.append(frame, close);\n  document.body.append(root);\n}\n"
+    }
+  ]
+}

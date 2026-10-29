@@ -7,3 +7,12 @@ await build({
   target: "chrome120",
   sourcemap: false,
 });
+await build({
+  entryPoints: ["src/pet-client.js"],
+  outfile: "lib/pet-client.js",
+  bundle: true,
+  format: "iife",
+  target: "chrome120",
+  sourcemap: false,
+  minify: true,
+});

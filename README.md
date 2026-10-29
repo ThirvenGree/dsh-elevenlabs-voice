@@ -1,6 +1,6 @@
 # DSH ElevenLabs Voice
 
-为 DeepSeek Harness Desktop 提供按钮录音、Scribe 批量转写和手动回答朗读。按照统一语音需求 V1.4 实现第一阶段：**Core + DSH Voice**。Pet Voice 仅预留同包扩展位置，实时对话属于第二阶段。
+为 DeepSeek Harness Desktop 提供按钮录音、Scribe 批量转写、回答朗读，以及现有 Pet 的实时语音对话。**Core + DSH Voice + Pet Voice** 共用同一个插件和环境变量密钥，保留两端独立配置。
 
 ## 使用
 
@@ -17,7 +17,7 @@
 下载 GitHub Release 的 `.tgz`，通过 DSH 插件安装入口导入，或使用 DSH CLI：
 
 ```powershell
-dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.0.2.tgz
+dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.1.0.tgz
 ```
 
 开发安装：
@@ -63,7 +63,7 @@ Markdown 先转换为适合朗读的文字；长回答按句段分块；播放�
 
 `src/core.js` 管理 ElevenLabs API、取消、错误和请求回执；`src/host.js` 提供受保护的本机接口；不注册原生 Speech Provider，避免第二个入口绕过本插件插入规则；`src/client.js` 管理 DSH 插槽、录音、插入及播放；`src/shared.js` 放置配置校验及纯函数；`src/ui-state.js` 管理按需订阅、正文快照索引及共享选区监听。
 
-Pet 的能力声明固定为 `petVoice:false`，设置 `pet.enabled:false`。后续在同一个包内加入独立的 Voice ID、LLM、会话和实时音频模块，共用环境变量与 API 层；不需要另装一套语音插件。本版本不会开始 Pet 录音或改变现有 Pet 插件。Speech Engine 公网入口方案待第二阶段确定。
+Pet Voice 已在 1.1.0 接入同一个包。现有 `pet.enabled:false` 字段仅为旧配置兼容；实际每只 Pet 的独立语音设置保存在本机 `elevenlabs-voice/pet.json`，通过 Pet 面板修改。主开关关闭时两端停止；DSH 听写开关不会关闭 Pet 语音。
 
 ## 开发与验证
 
@@ -94,3 +94,38 @@ npm pack
 - 预取失败的分段不再被缓存为失败结果，轮到该段播放时会重新请求。
 - 回答按钮按会话和消息订阅一次聊天快照，不随每次渲染重复订阅。
 - `npm run check` 补充检查 `src/shared.js` 和 `src/ui-state.js`。
+
+
+## v1.1.0 Pet 实时语音
+
+在现有 Pet 的右键菜单选择 **语音对话**，也可在 Pet 设置中点 **语音与实时对话设置**。默认跟随 DSH 当前模型；可填写独立 provider/model（必须是 DSH 已配置的路由），不会修改 Agent 的模型。角色继续在现有 Pet / cosplay 中管理，共享模式每轮读取当前人设、生活、心情和已授权记忆。Pet 最近记录与 Agent 会话分开；真实用户话语继续交给已安装生活/记忆插件审核。清空按钮仅清除 Pet 最近记录，不删除共享长期记忆。
+
+- **开始实时对话**：点击后开启麦克风，Speech Engine 处理识别、轮次、合成和打断，正文交给 DSH LLM 流式生成。停止、关闭面板或禁用后释放录音、连接和动作锁。断线最多自动重连三次。
+- **发送并朗读**：不需要麦克风；实时连接中也可用文字打断和继续对话。
+- **直接朗读 / 当前台词**：不调用 LLM，使用所选 Voice ID 和 TTS 模型；24 条内存音频缓存，长文分段。默认 `eleven_v4_turbo`，可改 `eleven_v4`。
+- **自动出声**默认关闭，只消费已经公开的 Pet 台词，不朗读工具日志；02:00–06:00 安静，默认冷却 30 分钟、每小时最多 3 次。实时对话优先。
+- 说话时复用现有 Pet 动作锁暂停动画，结束后恢复。Web 和桌面只允许同一 Pet 的一个音频拥有者，避免重复播放。
+- 模型可提议 1 秒至 24 小时的计时器和公开 HTTPS 网页；面板展示确认按钮后才执行。没有文件、终端或任意系统执行权限，复杂任务仍在 DSH 处理。计时器随 DSH 退出取消。
+
+### 为已有 Pet 安装适配
+
+不安装第二个 Pet。先备份现有包，运行：
+
+```sh
+node scripts/install-pet-adapter.mjs "你的现有 dsh-pet 包目录" --check
+node scripts/install-pet-adapter.mjs "你的现有 dsh-pet 包目录"
+```
+
+适配器以现有 0.3.8 代码为基础，只修改匹配的代码片段；无法匹配会在写入前停止。保存修改前备份，随后运行 Pet 的类型、lint、测试、OpenAPI 和构建检查。重启 DSH 后生效。已经适配时可重复检查，不改角色、资源和用户配置。其他上游版本需要先核对差异，不能强行覆盖。
+
+### 网络和权限
+
+Speech Engine 必须从 ElevenLabs 连接公开 WSS。此版本用系统 OpenSSH 和 Pinggy 免费临时隧道，仅暴露独立的、带 ElevenLabs 签名校验的上游端口，**不转发 DSH 页面、本机设置或控制接口**。首次建立时自动生成仅供隧道使用的本机 Ed25519 key 和独立 known_hosts，不修改全局 SSH 配置，不关闭主机校验。免费隧道限时 60 分钟，45 分钟启动续期并更新引擎地址，旧连接保留最多 10 分钟；空闲后关闭隧道。服务端和网络中断仍可能导致会话重连。无固定域名或付费服务依赖。
+
+Key 仍只从 `ELEVENLABS_API_KEY` 读取，需现有 STT/TTS 权限以及 ElevenAgents Write；不发送到浏览器、不写入插件设置。每 Pet 的引擎 ID 保存在本机，重启可复用并更新地址，正常关闭尝试删除；失败记录保留以便下次复用。
+
+本机面板使用随机能力地址、严格 Host/端口/Origin 校验及写请求令牌；公网端口只接受正确路径及未过期的 ElevenLabs HS256 签名。面板地址有效期 24 小时，不应分享给他人。修改会话或配置时不会复制 DSH API 密钥。
+
+如果一键启动器通过“宿主拥有的第一个端口”寻找 DSH，需要改为验证主服务的 `401 dsh web authentication required` 响应：插件也可以拥有自己的本机监听端口。
+
+官方协议：[Speech Engine](https://elevenlabs.io/docs/eleven-api/guides/cookbooks/speech-engine)、[上游签名和流协议](https://elevenlabs.io/docs/api-reference/speech-engine/speech-engine-upstream)、[JavaScript 客户端](https://elevenlabs.io/docs/eleven-agents/libraries/java-script)、[Pinggy 使用说明](https://pinggy.io/docs/usages/)。
