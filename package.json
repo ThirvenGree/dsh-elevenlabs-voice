@@ -1,0 +1,60 @@
+{
+  "name": "dsh-elevenlabs-voice",
+  "version": "1.0.0",
+  "description": "Unified ElevenLabs batch dictation and explicit reply playback for DeepSeek Harness",
+  "type": "module",
+  "main": "src/host.js",
+  "exports": {
+    ".": "./src/host.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "ACCEPTANCE.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots",
+        "conversation",
+        "uiConversation",
+        "sessions"
+      ],
+      "external": [
+        "react",
+        "react/jsx-runtime"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "npm run build && node --test test/*.test.js",
+    "check": "node --check src/host.js && node --check src/core.js && node --check src/client.js",
+    "prepack": "npm run check && npm test",
+    "format": "prettier --write src test scripts package.json"
+  },
+  "dependencies": {
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "prettier": "^3.9.10"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThirvenGree/dsh-elevenlabs-voice.git"
+  },
+  "license": "MIT"
+}

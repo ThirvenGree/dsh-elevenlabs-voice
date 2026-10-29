@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.env*
+coverage/
+local/
+*.mp3
+*.wav
+*.webm
