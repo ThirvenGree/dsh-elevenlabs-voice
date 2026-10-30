@@ -7,7 +7,7 @@ import { fetch, ProxyAgent } from "undici";
 import { VoiceCore, providerError } from "./core.js";
 import { PetTunnel, UpstreamTokenGuard } from "./pet-tunnel.js";
 import { petConfig, canSpeakAutomatically } from "./pet-config.js";
-import { PetReadingQueue } from "./pet-reading.js";
+import { PetReadingQueue, readingPolicy } from "./pet-reading.js";
 import { parsePetTask, withoutPetTask } from "./pet-tasks.js";
 
 const listen = (server) =>
@@ -44,6 +44,7 @@ export class PetVoiceHost {
     this.counters = new Map();
     this.reading = new PetReadingQueue();
     this.readiness = new Map();
+    this.realtime = new Set();
     this.routes = new Map();
     this.closed = false;
     this.upstreamOwners = new Map();
@@ -339,8 +340,13 @@ export class PetVoiceHost {
       try {
         if (this.sockets.get(id) !== ws) return;
         const m = JSON.parse(bytes);
-        if (m.type === "reading-ready")
+        if (m.type === "reading-ready") {
           this.readiness.set(id, m.active === true);
+          if (m.realtime === true) {
+            this.realtime.add(id);
+            this.reading.clear(id);
+          } else this.realtime.delete(id);
+        }
         if (m.type === "read-result")
           this.reading.finish(id, ws, m.id, m.retry === true);
         if (m.type === "speaking")
@@ -351,11 +357,14 @@ export class PetVoiceHost {
     ws.on("close", () => {
       if (this.sockets.get(id) === ws) {
         this.sockets.delete(id);
+        this.readiness.delete(id);
+        this.reading.clear(id);
         this.stop(id);
       }
     });
   }
   stop(id) {
+    this.realtime.delete(id);
     this.jobs.get(id)?.abort();
     this.jobs.delete(id);
     this.cores.get(id)?.abort();
@@ -522,6 +531,7 @@ export class PetVoiceHost {
         return json(res, {
           petId: id,
           settings: this.settings(id),
+          readingPolicy,
           model: this.settings(id).provider
             ? {
                 provider: this.settings(id).provider,
@@ -549,7 +559,16 @@ export class PetVoiceHost {
           this.stop(id);
         return json(res, { ok: true });
       }
-      if (route === "session") return json(res, await this.signed(id));
+      if (route === "session") {
+        this.realtime.add(id);
+        this.reading.clear(id);
+        try {
+          return json(res, await this.signed(id));
+        } catch (error) {
+          this.realtime.delete(id);
+          throw error;
+        }
+      }
       if (route === "stop") {
         this.stop(id);
         return json(res, { ok: true });
@@ -573,10 +592,7 @@ export class PetVoiceHost {
             try {
               this.bridge().say(id, "计时结束：" + task.label);
             } catch {}
-            if (
-              this.config().enabled &&
-              canSpeakAutomatically(this.settings(id))
-            )
+            if (this.acceptsReading(id))
               this.reading.enqueue(
                 id,
                 "timer:" + data.taskId,
@@ -660,8 +676,19 @@ export class PetVoiceHost {
         );
     }
   }
+  acceptsReading(id) {
+    return (
+      this.config().enabled &&
+      canSpeakAutomatically(this.settings(id)) &&
+      this.sockets.get(id)?.readyState === 1 &&
+      !this.realtime.has(id) &&
+      !this.upstreamOwners.has(id) &&
+      !this.startingSessions.has(id)
+    );
+  }
   async tick() {
     if (this.closed) return;
+    this.reading.sweep();
     this.syncDictation();
     const live = [...this.wss.clients].some((ws) => ws.readyState === 1);
     if (
@@ -688,21 +715,12 @@ export class PetVoiceHost {
     for (const event of events) {
       const baseline = !this.counters.has(event.petId);
       this.counters.set(event.petId, event.counter);
-      this.reading.observe(
-        event,
-        this.config().enabled &&
-          canSpeakAutomatically(this.settings(event.petId)),
-        baseline,
-      );
+      this.reading.observe(event, this.acceptsReading(event.petId), baseline);
     }
     if (!this.unwatch && this.bridge().watchSay) {
       this.unwatch = this.bridge().watchSay((event) => {
         this.counters.set(event.petId, event.counter);
-        this.reading.observe(
-          event,
-          this.config().enabled &&
-            canSpeakAutomatically(this.settings(event.petId)),
-        );
+        this.reading.observe(event, this.acceptsReading(event.petId));
       });
     }
     for (const [id, owner] of this.sockets) {
@@ -711,6 +729,7 @@ export class PetVoiceHost {
         continue;
       }
       if (
+        !this.acceptsReading(id) ||
         !this.readiness.get(id) ||
         this.dictating ||
         this.jobs.has(id) ||

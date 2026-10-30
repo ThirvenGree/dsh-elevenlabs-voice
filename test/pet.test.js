@@ -341,7 +341,7 @@ test("DSH dictation pauses the Pet panel as an ordered, expiring lease", async (
   }
 });
 
-test("host subscribes every output and retains busy or disconnected playback until acknowledgement", async () => {
+test("host drops offline and realtime output, queues short busy periods and clears on disconnect", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "dsh-pet-output-"));
   let observe,
     unsubscribed = false;
@@ -366,6 +366,7 @@ test("host subscribes every output and retains busy or disconnected playback unt
     await host.tick();
     observe({ petId: "main", counter: 1, data: { text: "先说的" } });
     observe({ petId: "main", counter: 2, data: { text: "紧接着" } });
+    assert.equal(host.reading.items.size, 0);
     const { url } = await host.panel("main");
     socket = new WebSocket(url.replace("http:", "ws:") + "socket");
     const messages = [];
@@ -373,6 +374,8 @@ test("host subscribes every output and retains busy or disconnected playback unt
     await new Promise((r) => socket.once("open", r));
     socket.send(JSON.stringify({ type: "reading-ready", active: true }));
     await new Promise((r) => setTimeout(r, 20));
+    observe({ petId: "main", counter: 3, data: { text: "先说的" } });
+    observe({ petId: "main", counter: 4, data: { text: "紧接着" } });
     host.jobs.set("main", new AbortController());
     await host.tick();
     assert.equal(messages.filter((m) => m.type === "speak").length, 0);
@@ -383,7 +386,7 @@ test("host subscribes every output and retains busy or disconnected playback unt
       messages.filter((m) => m.type === "speak").map((m) => m.text),
       ["先说的"],
     );
-    socket.send(JSON.stringify({ type: "read-result", id: 1 }));
+    socket.send(JSON.stringify({ type: "read-result", id: 3 }));
     await new Promise((r) => setTimeout(r, 20));
     await host.tick();
     await new Promise((r) => setTimeout(r, 20));
@@ -391,6 +394,23 @@ test("host subscribes every output and retains busy or disconnected playback unt
       messages.filter((m) => m.type === "speak").map((m) => m.text),
       ["先说的", "紧接着"],
     );
+    socket.send(
+      JSON.stringify({ type: "reading-ready", active: false, realtime: true }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    observe({ petId: "main", counter: 5, data: { text: "实时对话中的旧话" } });
+    assert.equal(host.reading.items.size, 0);
+    socket.send(
+      JSON.stringify({ type: "reading-ready", active: true, realtime: false }),
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    observe({ petId: "main", counter: 6, data: { text: "恢复后的新话" } });
+    assert.equal(host.reading.items.get("main").length, 1);
+    socket.close();
+    await new Promise((r) => socket.once("close", r));
+    await new Promise((r) => setTimeout(r, 20));
+    observe({ petId: "main", counter: 7, data: { text: "已断线" } });
+    assert.equal(host.reading.items.size, 0);
   } finally {
     socket?.terminate();
     await host.close();

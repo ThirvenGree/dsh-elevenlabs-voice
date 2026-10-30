@@ -16,6 +16,7 @@ let selectedMode = "realtime";
 function readingReady() {
   send({
     type: "reading-ready",
+    realtime: wanted || !!conversation,
     active:
       !unloading &&
       !wanted &&
