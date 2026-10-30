@@ -1,3 +1,890 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pet 语音</title><style>
-*{box-sizing:border-box}body{margin:0;padding:22px 16px;background:#f5f7fa;color:#213244;font:14px/1.65 system-ui}h2{font-size:19px;margin:0}small,#status{color:#60758a}button,input,textarea,select{font:inherit;border:1px solid #ccd7df;border-radius:9px;padding:8px;background:white;color:inherit}button{cursor:pointer}button.primary{background:#315f78;color:white;border:0}button:disabled{opacity:.5}input,textarea,select{width:100%}input[type=checkbox]{width:auto}label{display:block;margin:10px 0}#log{height:190px;overflow:auto;background:white;padding:12px;border-radius:12px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}.user{color:#557a8a}.assistant{margin:9px 0}#status{min-height:25px}.row{display:flex;gap:7px;margin:8px 0}.row>*{flex:1}summary{cursor:pointer;font-weight:600}details{background:#e9eff2;border-radius:12px;padding:12px;margin-top:15px}#speaking{color:#1c8068;font-weight:600}p{margin:5px 0}
-</style></head><body><h2>Pet 语音 <span id="speaking"></span></h2><small id="model">跟随 DSH 当前模型 · 共用已启用的人设与记忆</small><div id="status" role="status">连接中…</div><div class="row"><button class="primary" id="start">开始实时对话</button><button id="stop">停止 / 打断</button></div><div id="log" aria-live="polite"></div><textarea id="text" rows="2" placeholder="文字对话，或输入需要直接朗读的内容"></textarea><div class="row"><button id="chat">发送并朗读</button><button id="speak">直接朗读</button></div><button id="last">朗读 Pet 当前台词</button><div id="tasks"></div><details><summary>声音与自动说话设置</summary><form id="settings"><label><input type="checkbox" name="enabled"> 启用 Pet 语音</label><p>LLM 留空时实时跟随 DSH；填写后仅此 Pet 使用指定模型。人设继续在 cosplay / 现有 Pet 设置管理。</p><label>LLM 提供商<input name="provider" placeholder="留空跟随 DSH"></label><label>LLM 模型<input name="model" placeholder="留空跟随 DSH"></label><label>声音 ID<input name="voiceId" placeholder="留空沿用统一语音的声音"></label><label>ElevenLabs 模型<input name="ttsModel" placeholder="eleven_v4_turbo"></label><label>单次实时对话上限 / 分钟<input name="sessionMinutes" type="number" min="1" max="60"></label><p>到时 ElevenLabs 结束本次对话，面板自动重连继续，中间会有短暂停顿。</p><label>音量<input name="volume" type="range" min="0" max="1" step="0.05"></label><label><input type="checkbox" name="autonomous"> 允许已有台词自动出声（默认关闭）</label><p>02:00–06:00 安静；实时对话优先。</p><label>自动说话冷却 / 分钟<input name="cooldownMinutes" type="number" min="1" max="1440"></label><label>每小时自动说话上限<input name="hourlyLimit" type="number" min="1" max="20"></label><button class="primary">保存设置</button></form><p>保存会停止当前 Pet 会话；不会影响 DSH 听写。</p></details><details><summary>Pet 最近记录</summary><p>与 DSH Agent 会话分开。重要事实仍经已有记忆插件审核；清空只删除 Pet 最近记录。</p><button id="clear">清空本 Pet 最近记录</button></details><script src="client.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Pet 语音</title>
+    <style>
+      /* Colour carries who is talking: teal is you, violet is the Pet, amber
+         is paused for DSH dictation. Everything else stays neutral. */
+      :root {
+        --bg: #f2f5f4;
+        --surface: #ffffff;
+        --ink: #1c292b;
+        --muted: #5d6d70;
+        --faint: #8a9799;
+        --line: #dae2e0;
+        --listen: #2a7870;
+        --speak: #6550c6;
+        --pause: #9a6410;
+        --danger: #b23a22;
+        --on-accent: #ffffff;
+        --raised: #ffffff;
+        color-scheme: light;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg: #111617;
+          --surface: #192022;
+          --ink: #e3ebe9;
+          --muted: #92a3a5;
+          --faint: #6c7b7d;
+          --line: #283235;
+          --listen: #57bfb3;
+          --speak: #a693ff;
+          --pause: #e2a746;
+          --danger: #f08b70;
+          --on-accent: #0f1414;
+          --raised: #2b3538;
+          color-scheme: dark;
+        }
+      }
+      :root[data-theme="dark"] {
+        --bg: #111617;
+        --surface: #192022;
+        --ink: #e3ebe9;
+        --muted: #92a3a5;
+        --faint: #6c7b7d;
+        --line: #283235;
+        --listen: #57bfb3;
+        --speak: #a693ff;
+        --pause: #e2a746;
+        --danger: #f08b70;
+        --on-accent: #0f1414;
+        --raised: #2b3538;
+        color-scheme: dark;
+      }
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          13.5px/1.55 -apple-system,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei UI",
+          "Noto Sans SC",
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      p {
+        margin: 0;
+      }
+      button,
+      input,
+      textarea {
+        font: inherit;
+        color: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: default;
+        opacity: 0.45;
+      }
+      :focus-visible {
+        outline: 2px solid var(--listen);
+        outline-offset: 2px;
+      }
+      .pv-sr {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+      .pv {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        padding: 16px 16px 0;
+      }
+
+      /* The talk button: the one bold element on the panel. */
+      .pv-call {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 4px 0 12px 4px;
+      }
+      .pv-orb {
+        --tone: var(--muted);
+        --level: 0;
+        position: relative;
+        display: grid;
+        place-items: center;
+        flex: none;
+        width: 56px;
+        height: 56px;
+        padding: 0;
+        border: 1.5px solid var(--line);
+        border-radius: 50%;
+        background: var(--surface);
+        color: var(--ink);
+        transition:
+          background-color 0.2s ease,
+          border-color 0.2s ease,
+          color 0.2s ease;
+      }
+      .pv-orb:hover {
+        border-color: var(--listen);
+      }
+      .pv-orb svg {
+        width: 22px;
+        height: 22px;
+        display: none;
+      }
+      .pv-ring {
+        position: absolute;
+        inset: -6px;
+        border: 2px solid var(--tone);
+        border-radius: 50%;
+        opacity: 0;
+        transform: scale(calc(1 + var(--level) * 0.2));
+        pointer-events: none;
+      }
+      body[data-call="idle"] .pv-icon-mic,
+      body[data-call="paused"] .pv-icon-pause,
+      body:is(
+          [data-call="listening"],
+          [data-call="speaking"],
+          [data-call="playing"],
+          [data-call="connecting"],
+          [data-call="reconnecting"]
+        )
+        .pv-icon-stop {
+        display: block;
+      }
+      body[data-call="listening"] .pv-orb {
+        --tone: var(--listen);
+      }
+      body:is([data-call="speaking"], [data-call="playing"]) .pv-orb {
+        --tone: var(--speak);
+      }
+      body[data-call="paused"] .pv-orb {
+        --tone: var(--pause);
+      }
+      body:is(
+          [data-call="listening"],
+          [data-call="speaking"],
+          [data-call="playing"],
+          [data-call="paused"]
+        )
+        .pv-orb {
+        border-color: var(--tone);
+        background: var(--tone);
+        color: var(--on-accent);
+      }
+      body:is([data-call="listening"], [data-call="speaking"]) .pv-ring {
+        opacity: calc(0.18 + var(--level) * 0.7);
+      }
+      body[data-call="playing"] .pv-ring {
+        animation: pv-breathe 1.6s ease-in-out infinite;
+      }
+      body:is([data-call="connecting"], [data-call="reconnecting"]) .pv-ring {
+        inset: -4px;
+        border-color: var(--line);
+        border-top-color: var(--listen);
+        opacity: 1;
+        transform: none;
+        animation: pv-spin 0.9s linear infinite;
+      }
+      @keyframes pv-breathe {
+        0%,
+        100% {
+          opacity: 0.15;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0.55;
+          transform: scale(1.1);
+        }
+      }
+      @keyframes pv-spin {
+        to {
+          rotate: 1turn;
+        }
+      }
+      .pv-call-text {
+        min-width: 0;
+      }
+      .pv-call-title {
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 22px;
+      }
+      .pv-call-hint {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 18px;
+      }
+      .pv-status {
+        min-height: 18px;
+        margin-bottom: 8px;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 18px;
+        overflow-wrap: anywhere;
+      }
+      .pv-status:empty {
+        display: none;
+      }
+      .pv-status[data-tone="error"] {
+        color: var(--danger);
+      }
+      .pv-status[data-tone="ok"] {
+        color: var(--listen);
+      }
+
+      .pv-tabs {
+        display: flex;
+        gap: 2px;
+        padding: 2px;
+        border-radius: 9px;
+        background: color-mix(in srgb, var(--ink) 7%, transparent);
+      }
+      .pv-tab {
+        flex: 1;
+        height: 28px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 500;
+      }
+      .pv-tab[aria-selected="true"] {
+        background: var(--raised);
+        color: var(--ink);
+        box-shadow: 0 1px 2px rgb(20 30 30 / 10%);
+      }
+      .pv-panel {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        min-height: 0;
+      }
+      .pv-panel[hidden] {
+        display: none;
+      }
+
+      .pv-log {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 72px;
+        margin: 12px -16px 0;
+        padding: 4px 16px 12px;
+        overflow-y: auto;
+        overflow-wrap: anywhere;
+        white-space: pre-wrap;
+      }
+      .pv-msg {
+        max-width: 86%;
+        padding: 7px 12px;
+        border-radius: 14px;
+        line-height: 21px;
+      }
+      .pv-msg--pet {
+        align-self: flex-start;
+        border: 1px solid var(--line);
+        border-bottom-left-radius: 4px;
+        background: var(--surface);
+      }
+      .pv-msg--user {
+        align-self: flex-end;
+        border-bottom-right-radius: 4px;
+        background: color-mix(in srgb, var(--listen) 14%, var(--surface));
+      }
+      .pv-empty {
+        margin: auto;
+        max-width: 260px;
+        color: var(--faint);
+        text-wrap: balance;
+        font-size: 12.5px;
+        text-align: center;
+        white-space: normal;
+      }
+
+      .pv-task {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 10px;
+        padding: 10px 12px;
+        border: 1px solid color-mix(in srgb, var(--speak) 35%, var(--line));
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--speak) 8%, var(--surface));
+        overflow-wrap: anywhere;
+      }
+      .pv-task-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+
+      .pv-composer {
+        margin: 0 -16px;
+        padding: 10px 16px 14px;
+        border-top: 1px solid var(--line);
+        background: var(--bg);
+      }
+      .pv-composer textarea {
+        display: block;
+        width: 100%;
+        min-height: 40px;
+        max-height: 128px;
+        padding: 9px 12px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+        line-height: 20px;
+        resize: none;
+      }
+      .pv-composer textarea:focus-visible {
+        border-color: var(--listen);
+        outline: none;
+      }
+      .pv-composer textarea::placeholder,
+      .pv-input::placeholder {
+        color: var(--faint);
+      }
+      .pv-bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .pv-links {
+        display: flex;
+        gap: 14px;
+        margin-right: auto;
+      }
+      .pv-bar .pv-link[data-armed]:not(:disabled) {
+        color: var(--danger);
+        font-weight: 600;
+      }
+
+      .pv-btn {
+        height: 30px;
+        padding: 0 14px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        font-size: 13px;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .pv-btn:hover:not(:disabled) {
+        border-color: var(--faint);
+      }
+      .pv-primary {
+        border-color: transparent;
+        background: var(--listen);
+        color: var(--on-accent);
+      }
+      .pv-primary:hover:not(:disabled) {
+        border-color: transparent;
+        filter: brightness(1.07);
+      }
+      .pv-danger {
+        border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+        color: var(--danger);
+      }
+      .pv-link {
+        padding: 2px 0;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pv-link:hover:not(:disabled) {
+        color: var(--ink);
+      }
+
+      .pv-form {
+        flex: 1;
+        min-height: 0;
+        margin: 8px -16px 0;
+        padding: 0 16px;
+        overflow-y: auto;
+      }
+      .pv-group {
+        padding: 14px 0 6px;
+        border-bottom: 1px solid var(--line);
+      }
+      .pv-group:last-of-type {
+        border-bottom: 0;
+      }
+      .pv-group-title {
+        margin: 0 0 6px;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .pv-field {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas: "label control" "hint control";
+        align-items: center;
+        column-gap: 16px;
+        padding: 8px 0;
+      }
+      .pv-field:not(:has(.pv-hint)) {
+        grid-template-areas: "label control";
+      }
+      .pv-field--wide {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas: "label" "hint" "control";
+      }
+      .pv-field--wide > .pv-control {
+        margin-top: 6px;
+      }
+      .pv-label {
+        grid-area: label;
+        font-size: 13px;
+        line-height: 20px;
+      }
+      .pv-hint {
+        grid-area: hint;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 17px;
+      }
+      .pv-control {
+        grid-area: control;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pv-input {
+        width: 100%;
+        height: 32px;
+        padding: 0 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        font-size: 13px;
+      }
+      .pv-input:focus-visible {
+        border-color: var(--listen);
+        outline: none;
+      }
+      .pv-input[type="number"] {
+        width: 76px;
+        font-variant-numeric: tabular-nums;
+      }
+      .pv-unit {
+        min-width: 2.2em;
+      }
+      .pv-pair {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+        width: 100%;
+      }
+      .pv-model {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 12px;
+        overflow-wrap: anywhere;
+      }
+
+      .pv-switch {
+        position: relative;
+        flex: none;
+        width: 36px;
+        height: 20px;
+        margin: 0;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--ink) 22%, transparent);
+        appearance: none;
+        cursor: pointer;
+        transition: background-color 0.18s ease;
+      }
+      .pv-switch::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: var(--surface);
+        box-shadow: 0 1px 2px rgb(20 30 30 / 22%);
+        transition: translate 0.18s ease;
+      }
+      .pv-switch:checked {
+        background: var(--listen);
+      }
+      .pv-switch:checked::after {
+        translate: 16px 0;
+      }
+
+      .pv-range {
+        flex: 1;
+        min-width: 0;
+        height: 20px;
+        margin: 0;
+        background: transparent;
+        appearance: none;
+      }
+      .pv-range::-webkit-slider-runnable-track {
+        height: 4px;
+        border-radius: 999px;
+        background: linear-gradient(
+          to right,
+          var(--listen) var(--fill, 0%),
+          color-mix(in srgb, var(--ink) 14%, transparent) var(--fill, 0%)
+        );
+      }
+      .pv-range::-webkit-slider-thumb {
+        width: 14px;
+        height: 14px;
+        margin-top: -5px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow:
+          0 0 0 1px rgb(0 0 0 / 14%),
+          0 1px 3px rgb(0 0 0 / 25%);
+        appearance: none;
+      }
+      .pv-range + output {
+        min-width: 36px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .pv-save {
+        position: sticky;
+        bottom: 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 -16px;
+        padding: 10px 16px 14px;
+        border-top: 1px solid var(--line);
+        background: var(--bg);
+      }
+      .pv-save p {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .pv-orb,
+        .pv-switch,
+        .pv-switch::after {
+          transition: none;
+        }
+        .pv-ring {
+          transform: none !important;
+          animation: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body data-call="idle">
+    <main class="pv">
+      <section class="pv-call" aria-label="实时对话">
+        <button
+          id="orb"
+          class="pv-orb"
+          type="button"
+          aria-label="开始实时对话"
+          aria-describedby="call-hint"
+        >
+          <span class="pv-ring" aria-hidden="true"></span>
+          <svg class="pv-icon-mic" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              d="M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3ZM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"
+            />
+          </svg>
+          <svg class="pv-icon-stop" viewBox="0 0 24 24" aria-hidden="true">
+            <rect
+              x="7"
+              y="7"
+              width="10"
+              height="10"
+              rx="2.2"
+              fill="currentColor"
+            />
+          </svg>
+          <svg class="pv-icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+            <rect
+              x="7"
+              y="6"
+              width="3.4"
+              height="12"
+              rx="1.2"
+              fill="currentColor"
+            />
+            <rect
+              x="13.6"
+              y="6"
+              width="3.4"
+              height="12"
+              rx="1.2"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
+        <div class="pv-call-text">
+          <p id="call-title" class="pv-call-title">开始实时对话</p>
+          <p id="call-hint" class="pv-call-hint">点击后才会开启麦克风</p>
+        </div>
+      </section>
+      <p id="status" class="pv-status" role="status"></p>
+      <div class="pv-tabs" role="tablist" aria-label="面板内容">
+        <button
+          id="tab-chat"
+          class="pv-tab"
+          type="button"
+          role="tab"
+          aria-selected="true"
+          aria-controls="panel-chat"
+        >
+          对话
+        </button>
+        <button
+          id="tab-settings"
+          class="pv-tab"
+          type="button"
+          role="tab"
+          aria-selected="false"
+          aria-controls="panel-settings"
+          tabindex="-1"
+        >
+          设置
+        </button>
+      </div>
+
+      <section
+        id="panel-chat"
+        class="pv-panel"
+        role="tabpanel"
+        aria-labelledby="tab-chat"
+      >
+        <div id="log" class="pv-log" aria-live="polite"></div>
+        <div id="tasks"></div>
+        <div class="pv-composer">
+          <label class="pv-sr" for="text">输入文字</label>
+          <textarea
+            id="text"
+            rows="1"
+            placeholder="和 Pet 聊天，或输入要直接朗读的文字"
+          ></textarea>
+          <div class="pv-bar">
+            <span class="pv-links">
+              <button id="last" class="pv-link" type="button">
+                朗读当前台词
+              </button>
+              <button
+                id="clear"
+                class="pv-link"
+                type="button"
+                title="清空这只 Pet 的最近对话，DSH 长期记忆保留"
+              >
+                清空对话
+              </button>
+            </span>
+            <button
+              id="speak"
+              class="pv-btn"
+              type="button"
+              title="直接朗读输入框里的文字，不经过对话模型"
+            >
+              朗读
+            </button>
+            <button
+              id="chat"
+              class="pv-btn pv-primary"
+              type="button"
+              title="发给 Pet，并朗读它的回答（Enter 发送，Shift+Enter 换行）"
+            >
+              发送
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section
+        id="panel-settings"
+        class="pv-panel"
+        role="tabpanel"
+        aria-labelledby="tab-settings"
+        hidden
+      >
+        <form id="settings" class="pv-form">
+          <div class="pv-group">
+            <label class="pv-field">
+              <span class="pv-label">启用 Pet 语音</span>
+              <span class="pv-hint"
+                >关闭后这只 Pet 不再出声，也不能实时对话。</span
+              >
+              <span class="pv-control"
+                ><input class="pv-switch" type="checkbox" name="enabled"
+              /></span>
+            </label>
+          </div>
+
+          <div class="pv-group">
+            <h3 class="pv-group-title">声音</h3>
+            <label class="pv-field pv-field--wide">
+              <span class="pv-label">声音 ID</span>
+              <span class="pv-hint">留空时沿用 DSH 回答朗读的声音。</span>
+              <span class="pv-control"
+                ><input
+                  class="pv-input"
+                  name="voiceId"
+                  placeholder="粘贴 ElevenLabs Voice ID"
+                  spellcheck="false"
+                  autocomplete="off"
+              /></span>
+            </label>
+            <label class="pv-field pv-field--wide">
+              <span class="pv-label">ElevenLabs 模型</span>
+              <span class="pv-hint"
+                >eleven_v4_turbo 延迟低；eleven_v4 音质更好。</span
+              >
+              <span class="pv-control"
+                ><input
+                  class="pv-input"
+                  name="ttsModel"
+                  list="pv-tts-models"
+                  placeholder="eleven_v4_turbo"
+                  spellcheck="false"
+                  autocomplete="off"
+              /></span>
+            </label>
+            <datalist id="pv-tts-models">
+              <option value="eleven_v4_turbo"></option>
+              <option value="eleven_v4"></option>
+            </datalist>
+            <label class="pv-field pv-field--wide">
+              <span class="pv-label">音量</span>
+              <span class="pv-control"
+                ><input
+                  id="volume"
+                  class="pv-range"
+                  name="volume"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05" /><output id="volume-out" for="volume"></output
+              ></span>
+            </label>
+          </div>
+
+          <div class="pv-group">
+            <h3 class="pv-group-title">对话模型</h3>
+            <div class="pv-field pv-field--wide">
+              <span class="pv-label">提供商和模型</span>
+              <span class="pv-hint"
+                >都留空时跟随 DSH 当前模型；填写后只有这只 Pet 使用。必须是 DSH
+                已配置的路由。</span
+              >
+              <span class="pv-control pv-pair">
+                <input
+                  class="pv-input"
+                  name="provider"
+                  placeholder="提供商"
+                  aria-label="LLM 提供商"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+                <input
+                  class="pv-input"
+                  name="model"
+                  placeholder="模型"
+                  aria-label="LLM 模型"
+                  spellcheck="false"
+                  autocomplete="off"
+                />
+              </span>
+              <p id="model" class="pv-model"></p>
+            </div>
+          </div>
+
+          <div class="pv-group">
+            <h3 class="pv-group-title">实时对话</h3>
+            <label class="pv-field">
+              <span class="pv-label">单次对话上限</span>
+              <span class="pv-hint">到时自动重连继续，中间会停顿一下。</span>
+              <span class="pv-control"
+                ><input
+                  class="pv-input"
+                  name="sessionMinutes"
+                  type="number"
+                  min="1"
+                  max="60"
+                /><span class="pv-unit">分钟</span></span
+              >
+            </label>
+          </div>
+
+          <div class="pv-group">
+            <h3 class="pv-group-title">自动出声</h3>
+            <label class="pv-field">
+              <span class="pv-label">让已有台词自动出声</span>
+              <span class="pv-hint"
+                >默认关闭。02:00–06:00 不出声，实时对话和 DSH 听写时让路。</span
+              >
+              <span class="pv-control"
+                ><input class="pv-switch" type="checkbox" name="autonomous"
+              /></span>
+            </label>
+            <label class="pv-field">
+              <span class="pv-label">两次之间至少间隔</span>
+              <span class="pv-control"
+                ><input
+                  class="pv-input"
+                  name="cooldownMinutes"
+                  type="number"
+                  min="1"
+                  max="1440"
+                /><span class="pv-unit">分钟</span></span
+              >
+            </label>
+            <label class="pv-field">
+              <span class="pv-label">每小时最多</span>
+              <span class="pv-control"
+                ><input
+                  class="pv-input"
+                  name="hourlyLimit"
+                  type="number"
+                  min="1"
+                  max="20"
+                /><span class="pv-unit">次</span></span
+              >
+            </label>
+          </div>
+
+          <div class="pv-save">
+            <button class="pv-btn pv-primary" type="submit">保存设置</button>
+            <p>保存会结束当前对话。</p>
+          </div>
+        </form>
+      </section>
+    </main>
+    <script src="client.js"></script>
+  </body>
+</html>

@@ -837,73 +837,136 @@ window.__ModuleLoader__.load({
             [keytermsText, setKeytermsText] = useState(
               s.config?.keyterms.join("\n") || "",
             ),
-            [message, setMessage] = useState(""),
+            [message, setMessage] = useState(null),
+            [probe, setProbe] = useState(null),
             [busy, setBusy] = useState(false),
             [testText, setTestText] = useState("你好，这是一条语音试听。");
           useEffect(() => {
             setDraft(s.config);
             setKeytermsText(s.config?.keyterms.join("\n") || "");
           }, [s.config]);
-          if (!draft) return h("div", { children: "正在读取语音设置…" });
-          const set = (key, value) => setDraft({ ...draft, [key]: value });
-          const field = (label, key, type = "text") =>
-            h("label", {
-              className: "elv-field",
+          if (!draft)
+            return h("div", {
+              className: "elv-settings",
+              children: h("p", {
+                className: "elv-loading",
+                children: "正在读取语音设置…",
+              }),
+            });
+          const terms = parseKeyterms(keytermsText);
+          const dirty =
+            JSON.stringify({ ...draft, keyterms: terms }) !==
+            JSON.stringify(s.config);
+          const set = (key, value) => {
+            setDraft({ ...draft, [key]: value });
+            setMessage(null);
+          };
+          const id = (key) => "elv-" + key;
+          // One settings row: label and hint on the left, the control on the
+          // right; a narrow card moves the control under the text.
+          // layout: "stack" puts a wide control under the text; "inline"
+          // keeps a small control (switch, chip) beside it at every width.
+          const row = (key, label, hint, control, layout) =>
+            h("div", {
+              className: "elv-row" + (layout ? " elv-row--" + layout : ""),
               children: [
-                h("span", { children: label }),
-                h("input", {
-                  type,
-                  value: draft[key],
-                  min: key === "maxSeconds" ? 5 : undefined,
-                  max: key === "maxSeconds" ? 1800 : undefined,
-                  onChange: (e) =>
-                    set(
-                      key,
-                      type === "number"
-                        ? Number(e.target.value)
-                        : e.target.value,
+                h("label", {
+                  className: "elv-label",
+                  htmlFor: id(key),
+                  children: label,
+                }),
+                hint &&
+                  h("p", {
+                    className: "elv-hint",
+                    id: id(key) + "-hint",
+                    children: hint,
+                  }),
+                h("div", { className: "elv-control", children: control }),
+              ],
+            });
+          const toggle = (key, label) =>
+            h("button", {
+              type: "button",
+              role: "switch",
+              id: id(key),
+              className: "elv-switch",
+              "aria-checked": draft[key] ? "true" : "false",
+              ...(label
+                ? { "aria-label": label }
+                : { "aria-describedby": id(key) + "-hint" }),
+              onClick: () => set(key, !draft[key]),
+              children: h("span", { className: "elv-switch-thumb" }),
+            });
+          const text = (key, props = {}) =>
+            h("input", {
+              id: id(key),
+              className: "elv-input",
+              value: draft[key],
+              spellCheck: false,
+              autoComplete: "off",
+              "aria-describedby": id(key) + "-hint",
+              onChange: (e) => set(key, e.target.value),
+              ...props,
+            });
+          const device = (key, kind) =>
+            h("select", {
+              id: id(key),
+              className: "elv-input",
+              value: draft[key],
+              "aria-describedby": id(key) + "-hint",
+              onChange: (e) => set(key, e.target.value),
+              children: [
+                h("option", { value: "", children: "系统默认" }),
+                ...s.devices
+                  .filter((x) => x.kind === kind && x.deviceId !== "default")
+                  .map((x, i) =>
+                    h(
+                      "option",
+                      {
+                        value: x.deviceId,
+                        children: x.label || "设备 " + (i + 1),
+                      },
+                      x.deviceId,
                     ),
-                }),
+                  ),
               ],
             });
-          const toggle = (label, key) =>
-            h("label", {
-              className: "elv-toggle",
-              children: [
-                h("input", {
-                  type: "checkbox",
-                  checked: draft[key],
-                  onChange: (e) => set(key, e.target.checked),
-                }),
-                label,
-              ],
+          const button = (label, onClick, primary = false, disabled = busy) =>
+            h("button", {
+              type: "button",
+              className: "elv-btn" + (primary ? " elv-btn--primary" : ""),
+              disabled,
+              onClick,
+              children: label,
             });
-          const selectDevice = (label, key, kind) =>
-            h("label", {
-              className: "elv-field",
+          const card = (key, title, description, rows, action, off = false) =>
+            h("section", {
+              className: "elv-card",
+              "aria-labelledby": id(key) + "-title",
+              "data-off": off ? "" : undefined,
               children: [
-                h("span", { children: label }),
-                h("select", {
-                  value: draft[key],
-                  onChange: (e) => set(key, e.target.value),
+                h("div", {
+                  className: "elv-card-head",
                   children: [
-                    h("option", { value: "", children: "系统默认" }),
-                    ...s.devices
-                      .filter(
-                        (x) => x.kind === kind && x.deviceId !== "default",
-                      )
-                      .map((x, i) =>
-                        h(
-                          "option",
-                          {
-                            value: x.deviceId,
-                            children: x.label || "设备 " + (i + 1),
-                          },
-                          x.deviceId,
-                        ),
-                      ),
+                    h("div", {
+                      className: "elv-card-text",
+                      children: [
+                        h("h3", {
+                          className: "elv-card-title",
+                          id: id(key) + "-title",
+                          children: title,
+                        }),
+                        h("p", {
+                          className: "elv-card-desc",
+                          children: description,
+                        }),
+                      ],
+                    }),
+                    action || null,
                   ],
                 }),
+                rows &&
+                  h("div", { className: "elv-card-body", children: rows }),
               ],
             });
           async function save() {
@@ -915,183 +978,395 @@ window.__ModuleLoader__.load({
                 { method: "PUT" },
               );
               await refresh();
-              setMessage("已保存，即时生效");
+              setMessage({ tone: "ok", text: "已保存，立即生效" });
               return true;
             } catch (e) {
-              setMessage(e.message);
+              setMessage({ tone: "error", text: e.message });
               return false;
             } finally {
               setBusy(false);
             }
           }
+          const volume = Math.round(draft.volume * 100);
           return h("div", {
             className: "elv-settings",
             children: [
-              h("div", {
-                className: "elv-hero",
-                children: [
-                  h("h2", { children: "ElevenLabs Voice" }),
-                  h("p", {
-                    children: "按需录音与朗读 · Core + DSH Voice · 第一阶段",
-                  }),
-                  h("span", {
-                    className: s.keyPresent ? "elv-badge" : "elv-error",
-                    children: s.keyPresent
-                      ? "环境变量已读取"
-                      : "缺少 ELEVENLABS_API_KEY",
-                  }),
-                  h("p", {
-                    children:
-                      "密钥只从 DSH 进程环境读取，不在插件中保存或显示。更改 Windows 环境变量后请完全退出并重启 DSH。",
-                  }),
+              card(
+                "general",
+                "通用",
+                "统一管理 DSH 和 Pet 的 ElevenLabs 语音。",
+                [
+                  row(
+                    "enabled",
+                    "启用语音插件",
+                    "关闭后 DSH 和 Pet 的语音功能都会停止。",
+                    toggle("enabled"),
+                    "inline",
+                  ),
+                  row(
+                    "dshEnabled",
+                    "DSH 语音",
+                    "控制输入框麦克风和回答朗读，不影响 Pet 语音。",
+                    toggle("dshEnabled"),
+                    "inline",
+                  ),
+                  row(
+                    "key",
+                    "ElevenLabs 密钥",
+                    "只从 DSH 进程的 ELEVENLABS_API_KEY 环境变量读取，插件不保存也不显示。修改后需完全退出并重启 DSH。",
+                    h("span", {
+                      id: id("key"),
+                      className: "elv-chip",
+                      "data-tone": s.keyPresent ? "ok" : "error",
+                      children: s.keyPresent ? "已读取" : "未找到",
+                    }),
+                    "inline",
+                  ),
+                  row(
+                    "proxy",
+                    "本机 HTTP 代理",
+                    "例如 http://127.0.0.1:7897，留空则直连。只允许本机地址。",
+                    text("proxy", { placeholder: "留空直连" }),
+                  ),
+                  row(
+                    "connection",
+                    "连接测试",
+                    "读取账户可用的模型。提示缺少模型读取权限不代表密钥无效，可用试听单独验证朗读。",
+                    h("div", {
+                      className: "elv-action",
+                      children: [
+                        h("button", {
+                          type: "button",
+                          id: id("connection"),
+                          className: "elv-btn",
+                          disabled: busy,
+                          onClick: async () => {
+                            if (!(await save())) return;
+                            setBusy(true);
+                            setProbe(null);
+                            try {
+                              const result = await request("/connection", {});
+                              setProbe({
+                                tone: "ok",
+                                text:
+                                  "已连接，读取到 " +
+                                  result.models.length +
+                                  " 个模型",
+                              });
+                            } catch (e) {
+                              setProbe({ tone: "error", text: e.message });
+                            } finally {
+                              setBusy(false);
+                            }
+                          },
+                          children: "保存并测试连接",
+                        }),
+                        probe &&
+                          h("p", {
+                            className: "elv-result",
+                            "data-tone": probe.tone,
+                            role: "status",
+                            children: probe.text,
+                          }),
+                      ],
+                    }),
+                  ),
                 ],
-              }),
-              h("section", {
-                children: [
-                  toggle("启用统一语音插件", "enabled"),
-                  toggle("启用 DSH Voice", "dshEnabled"),
+              ),
+              card(
+                "devices",
+                "音频设备",
+                "设备名称在授予麦克风权限后显示。",
+                [
+                  row(
+                    "inputDevice",
+                    "输入设备",
+                    "DSH 听写使用的麦克风。",
+                    device("inputDevice", "audioinput"),
+                  ),
+                  row(
+                    "outputDevice",
+                    "输出设备",
+                    "回答朗读使用的扬声器；浏览器不支持时使用系统默认。",
+                    device("outputDevice", "audiooutput"),
+                  ),
                 ],
-              }),
-              h("section", {
-                children: [
-                  h("h3", { children: "语音输入" }),
-                  toggle("显示输入框麦克风按钮", "sttEnabled"),
-                  field("STT 模型 ID", "sttModel"),
-                  h("small", {
-                    children:
-                      "默认 scribe_v2；支持手动输入其他可用模型 ID。自动识别中文、英文和混合语言。",
-                  }),
-                  toggle("转写后自动发送（默认关闭）", "autoSend"),
-                  field("最大录音时长 / 秒", "maxSeconds", "number"),
-                  selectDevice("输入设备", "inputDevice", "audioinput"),
-                  h("button", {
-                    disabled: busy || Boolean(s.recording),
-                    onClick: async () => {
-                      if (await save())
-                        void startRecording(currentSession, true);
-                    },
-                    children: "录音测试（不会发送）",
-                  }),
-                  h("label", {
-                    className: "elv-field",
-                    children: [
-                      h("span", { children: "关键词（每行一个）" }),
+                h("button", {
+                  type: "button",
+                  className: "elv-text-btn",
+                  onClick: () => void devices(),
+                  children: "刷新设备列表",
+                }),
+              ),
+              card(
+                "stt",
+                "语音输入",
+                "点击输入框旁的麦克风录音，转写后放进输入框，发送前可以修改。",
+                [
+                  row(
+                    "sttModel",
+                    "转写模型",
+                    "默认 scribe_v2，自动识别中文、英文和混合语言。",
+                    text("sttModel", { list: "elv-stt-models" }),
+                  ),
+                  row(
+                    "maxSeconds",
+                    "最长录音",
+                    "到时自动结束并开始转写。",
+                    h("span", {
+                      className: "elv-unit",
+                      children: [
+                        text("maxSeconds", {
+                          type: "number",
+                          min: 5,
+                          max: 1800,
+                          onChange: (e) =>
+                            set("maxSeconds", Number(e.target.value)),
+                        }),
+                        h("span", { children: "秒" }),
+                      ],
+                    }),
+                  ),
+                  row(
+                    "autoSend",
+                    "转写后自动发送",
+                    "默认关闭。切换会话后返回的转写不会自动发送。",
+                    toggle("autoSend"),
+                    "inline",
+                  ),
+                  row(
+                    "keyterms",
+                    "术语表",
+                    "每行一个文件名、命令或专有名词，帮助识别更准确。会产生额外费用；超过 100 项时每次至少按 20 秒计费。",
+                    [
                       h("textarea", {
+                        id: id("keyterms"),
+                        className: "elv-input elv-textarea",
                         rows: 5,
+                        spellCheck: false,
+                        placeholder: "config.json\nnpm run build",
                         value: keytermsText,
-                        onChange: (e) => setKeytermsText(e.target.value),
+                        "aria-describedby": id("keyterms") + "-hint",
+                        onChange: (e) => {
+                          setKeytermsText(e.target.value);
+                          setMessage(null);
+                        },
+                      }),
+                      h("span", {
+                        className: "elv-count",
+                        "data-tone": terms.length > 1000 ? "error" : undefined,
+                        children: terms.length + " / 1000",
                       }),
                     ],
-                  }),
-                  h("small", {
-                    children:
-                      "最多 1000 项；每项少于 50 字符、至多 5 个词。关键词有额外费用；超过 100 项可能按至少 20 秒计费。转写保留音频事件标签，不经过模型润色。",
+                    "stack",
+                  ),
+                  row(
+                    "recordTest",
+                    "录音测试",
+                    "录一段话，只显示转写结果，不会插入或发送。",
+                    h("button", {
+                      type: "button",
+                      id: id("recordTest"),
+                      className: "elv-btn",
+                      disabled: busy || Boolean(s.recording),
+                      onClick: async () => {
+                        if (await save())
+                          void startRecording(currentSession, true);
+                      },
+                      children: "保存并录音测试",
+                    }),
+                  ),
+                  h("datalist", {
+                    id: "elv-stt-models",
+                    children: h("option", { value: "scribe_v2" }),
                   }),
                 ],
-              }),
-              h("section", {
-                children: [
-                  h("h3", { children: "回答朗读" }),
-                  toggle("显示回答正文播放按钮", "playbackEnabled"),
-                  field("TTS 模型 ID", "ttsModel"),
-                  h("small", {
-                    children:
-                      "默认 eleven_v4；可切换 eleven_v4_turbo 或填写账户可用的模型。V4 不使用 SSML、语速或风格滑块。",
-                  }),
-                  field("Voice ID", "voiceId"),
-                  selectDevice("输出设备", "outputDevice", "audiooutput"),
-                  h("label", {
-                    className: "elv-field",
+                toggle("sttEnabled", "显示输入框麦克风按钮"),
+                !draft.sttEnabled,
+              ),
+              card(
+                "tts",
+                "回答朗读",
+                "在每条回答旁显示播放键，点击后才合成，不会自动朗读。",
+                [
+                  row(
+                    "voiceId",
+                    "Voice ID",
+                    "在 ElevenLabs 声音库复制声音的 ID，必须是你的账户可用的声音。",
+                    text("voiceId", { placeholder: "粘贴 Voice ID" }),
+                  ),
+                  row(
+                    "ttsModel",
+                    "朗读模型",
+                    "默认 eleven_v4；eleven_v4_turbo 更快。",
+                    text("ttsModel", { list: "elv-tts-models" }),
+                  ),
+                  row(
+                    "volume",
+                    "默认音量",
+                    null,
+                    h("span", {
+                      className: "elv-range",
+                      children: [
+                        h("input", {
+                          id: id("volume"),
+                          type: "range",
+                          min: 0,
+                          max: 1,
+                          step: 0.05,
+                          value: draft.volume,
+                          style: { "--elv-fill": volume + "%" },
+                          onChange: (e) =>
+                            set("volume", Number(e.target.value)),
+                        }),
+                        h("output", {
+                          htmlFor: id("volume"),
+                          children: volume + "%",
+                        }),
+                      ],
+                    }),
+                  ),
+                  row(
+                    "preview",
+                    "试听",
+                    "用当前声音和模型合成下面这句话，会消耗额度。",
+                    h("div", {
+                      className: "elv-preview",
+                      children: [
+                        h("input", {
+                          id: id("preview"),
+                          className: "elv-input",
+                          value: testText,
+                          "aria-describedby": id("preview") + "-hint",
+                          onChange: (e) => setTestText(e.target.value),
+                        }),
+                        button("保存并试听", async () => {
+                          if (await save())
+                            void play(testText, "settings", "试听");
+                        }),
+                      ],
+                    }),
+                    "stack",
+                  ),
+                  h("datalist", {
+                    id: "elv-tts-models",
                     children: [
-                      h("span", { children: "默认播放音量" }),
-                      h("input", {
-                        type: "range",
-                        min: 0,
-                        max: 1,
-                        step: 0.05,
-                        value: draft.volume,
-                        onChange: (e) => set("volume", Number(e.target.value)),
-                      }),
+                      h("option", { value: "eleven_v4" }, "v4"),
+                      h("option", { value: "eleven_v4_turbo" }, "v4t"),
                     ],
                   }),
-                  h("textarea", {
-                    rows: 2,
-                    value: testText,
-                    onChange: (e) => setTestText(e.target.value),
-                  }),
-                  h("button", {
-                    disabled: busy,
-                    onClick: async () => {
-                      if (await save()) void play(testText, "settings", "试听");
-                    },
-                    children: "保存并试听（消耗额度）",
-                  }),
                 ],
-              }),
-              h("section", {
-                children: [
-                  h("h3", { children: "连接与设备" }),
-                  field("本机 HTTP 代理（可选）", "proxy"),
-                  h("small", {
-                    children:
-                      "例如 http://127.0.0.1:7897；留空直连。仅允许本机代理端口。",
-                  }),
-                  h("button", {
-                    onClick: () => void devices(),
-                    children: "刷新设备列表",
-                  }),
-                  h("button", {
-                    disabled: busy,
-                    onClick: async () => {
-                      if (!(await save())) return;
-                      setBusy(true);
-                      try {
-                        const result = await request("/connection", {});
-                        setMessage(
-                          "连接成功，读取到 " +
-                            result.models.length +
-                            " 个模型",
-                        );
-                      } catch (e) {
-                        setMessage(e.message);
-                      } finally {
-                        setBusy(false);
-                      }
-                    },
-                    children: "保存并测试连接",
-                  }),
-                  h("p", {
-                    children:
-                      "若提示缺少模型读取权限，不代表 key 无效；请检查 key 权限，或通过手动试听单独验证 TTS。设备名称可能需授权后才显示。",
-                  }),
-                ],
-              }),
-              h("section", {
-                children: [
-                  h("h3", { children: "Pet Voice · 实时对话" }),
-                  h("p", {
-                    children:
-                      "从桌宠右键菜单或桌宠设置进入「语音对话」。支持实时语音、打断和直接朗读；跟随 DSH 当前模型，并共用已启用的人设、生活和记忆。麦克风只在点击开始后启用。",
-                  }),
-                ],
-              }),
+                toggle("playbackEnabled", "显示回答播放键"),
+                !draft.playbackEnabled,
+              ),
+              card(
+                "pet",
+                "Pet 语音",
+                "在桌宠右键菜单选择「语音对话」打开语音面板。每只 Pet 的声音、对话模型、单次对话时长和自动出声都在面板里单独设置；麦克风只在点击开始后开启。",
+              ),
               h("div", {
-                className: "elv-save",
+                className: "elv-savebar",
+                "data-dirty": dirty ? "" : undefined,
                 children: [
-                  h("button", {
-                    disabled: busy,
-                    onClick: () => void save(),
-                    children: busy ? "处理中…" : "保存设置",
+                  h("p", {
+                    className: "elv-savebar-text",
+                    role: "status",
+                    "data-tone": message?.tone,
+                    children: message
+                      ? message.text
+                      : dirty
+                        ? "有未保存的更改"
+                        : "设置已是最新",
                   }),
-                  h("span", { role: "status", children: message }),
+                  button(
+                    "还原",
+                    () => {
+                      setDraft(s.config);
+                      setKeytermsText(s.config.keyterms.join("\n"));
+                      setMessage(null);
+                    },
+                    false,
+                    busy || !dirty,
+                  ),
+                  button("保存设置", () => void save(), true),
                 ],
               }),
             ],
           });
         }
+        const LEGACY_CSS =
+          ".elv-button{border:1px solid #ccd6df88;border-radius:8px;padding:4px 9px;background:transparent;color:inherit;cursor:pointer;font-size:12px}.elv-reply{display:inline-flex;gap:5px}.elv-panel{position:fixed;bottom:74px;right:28px;z-index:10000;max-width:440px;max-height:70vh;overflow:auto;padding:16px;border:1px solid #95aabb77;border-radius:16px;background:var(--background,#f4f7fa);color:var(--foreground,#172a39);box-shadow:0 10px 40px #0002;font-size:13px}.elv-panel textarea{width:100%;min-height:80px}.elv-panel button{margin:5px;padding:4px 8px}.elv-panel input[type=range]{max-width:150px}.elv-error{color:#b33b3b}";
         const style = document.createElement("style");
+        // Settings follow DSH's own settings vocabulary and semantic tokens, so
+        // every skin and the dark theme apply without a second palette.
         style.textContent =
-          ".elv-button{border:1px solid #ccd6df88;border-radius:8px;padding:4px 9px;background:transparent;color:inherit;cursor:pointer;font-size:12px}.elv-reply{display:inline-flex;gap:5px}.elv-panel{position:fixed;bottom:74px;right:28px;z-index:10000;max-width:440px;max-height:70vh;overflow:auto;padding:16px;border:1px solid #95aabb77;border-radius:16px;background:var(--background,#f4f7fa);color:var(--foreground,#172a39);box-shadow:0 10px 40px #0002;font-size:13px}.elv-panel textarea{width:100%;min-height:80px}.elv-panel button{margin:5px;padding:4px 8px}.elv-panel input[type=range]{max-width:150px}.elv-error{color:#b33b3b}.elv-settings{padding:20px 24px;max-width:850px;margin:auto;line-height:1.65;color:inherit}.elv-hero{padding:24px;border-radius:20px;background:linear-gradient(120deg,#95b6c733,#bfabd522);margin-bottom:20px}.elv-hero h2{margin:0;font-size:24px}.elv-badge{display:inline-block;border-radius:20px;padding:3px 12px;background:#60a58b25;color:#32856b}.elv-settings section{border:1px solid #96a6b333;border-radius:16px;padding:20px;margin:14px 0}.elv-settings h3{margin:0 0 12px}.elv-field{display:grid;grid-template-columns:185px minmax(0,1fr);gap:14px;align-items:center;margin:12px 0}.elv-settings input:not([type=checkbox]),.elv-settings textarea,.elv-settings select{border:1px solid #9aa8b866;border-radius:8px;padding:8px 10px;background:transparent;color:inherit;min-width:0}.elv-settings textarea{width:100%;box-sizing:border-box}.elv-toggle{display:flex;align-items:center;gap:10px;margin:10px 0}.elv-settings button{padding:8px 14px;margin:8px 10px 8px 0;border:1px solid #9aa8b877;border-radius:9px;background:#8caebe22;color:inherit;cursor:pointer}.elv-settings small{display:block;opacity:.7}.elv-save{position:sticky;bottom:0;background:var(--background,#f4f7fa);padding:12px;border-radius:12px}.elv-settings input:disabled,.elv-settings button:disabled{opacity:.5}";
+          LEGACY_CSS +
+          `
+.elv-settings{--elv-ink:var(--dsw-alias-label-primary,#1f2328);--elv-ink-2:var(--dsw-alias-label-secondary,#59636e);--elv-ink-3:var(--dsw-alias-label-tertiary,#8b949e);--elv-line:var(--dsw-alias-border-l2,rgb(31 35 40 / 12%));--elv-card:var(--dsw-alias-bg-layer-3,#fff);--elv-page:var(--dsw-alias-bg-layer-2,#f6f7f9);--elv-chip:var(--dsw-alias-bg-module-platform,rgb(31 35 40 / 6%));--elv-brand:var(--dsw-alias-brand-primary,#3f6ae0);--elv-fill-btn:var(--dsw-alias-button-primary-fill,var(--elv-ink));--elv-on-fill:var(--dsw-alias-label-primary-foreground,var(--elv-card));--elv-error:var(--dsw-alias-state-error-primary,#b42318);--elv-rail:var(--dsw-alias-label-dimmed,rgb(31 35 40 / 22%));--elv-hover:var(--dsw-alias-interactive-bg-hover,rgb(31 35 40 / 5%));container:elv-settings/inline-size;display:flex;flex-direction:column;gap:16px;max-width:720px;color:var(--elv-ink);font-size:14px;line-height:22px}
+.elv-settings *,.elv-settings *::before,.elv-settings *::after{box-sizing:border-box}
+.elv-settings p{margin:0}
+.elv-loading{color:var(--elv-ink-2);font-size:13px}
+.elv-card{border:1px solid var(--elv-line);border-radius:12px;background:var(--elv-card)}
+.elv-card-head{display:flex;align-items:center;gap:16px;padding:16px}
+.elv-card-text{display:flex;flex:1;flex-direction:column;gap:4px;min-width:0}
+.elv-card-title{margin:0;color:var(--elv-ink);font-size:15px;font-weight:600;line-height:1.4}
+.elv-card-desc{color:var(--elv-ink-2);font-size:12px;line-height:18px}
+.elv-card-body{margin:0 16px;padding-bottom:4px;border-top:1px solid var(--elv-line)}
+.elv-card[data-off] .elv-row{opacity:.55}
+.elv-row{display:grid;grid-template-columns:minmax(0,1fr) fit-content(52%);grid-template-areas:"label control" "hint control";align-items:center;gap:4px 24px;padding:16px 0}
+.elv-row+.elv-row{border-top:1px solid var(--elv-line)}
+.elv-row--stack{grid-template-columns:minmax(0,1fr);grid-template-areas:"label" "hint" "control";row-gap:4px}
+.elv-row--stack>.elv-control{margin-top:8px;justify-self:stretch}
+.elv-label{grid-area:label;color:var(--elv-ink);font-size:14px;line-height:22px}
+.elv-hint{grid-area:hint;color:var(--elv-ink-2);font-size:12px;line-height:18px}
+.elv-control{grid-area:control;justify-self:end;display:flex;align-items:center;min-width:0;max-width:100%}
+.elv-input{width:240px;max-width:100%;height:34px;padding:0 12px;border:1px solid var(--elv-line);border-radius:8px;background:var(--elv-card);color:var(--elv-ink);font:inherit;font-size:13px;line-height:1.5}
+.elv-input:hover{border-color:var(--elv-rail)}
+.elv-input:focus-visible{border-color:var(--elv-brand);outline:none}
+.elv-input::placeholder{color:var(--elv-ink-3)}
+select.elv-input{padding-right:8px;cursor:pointer}
+.elv-textarea{display:block;width:100%;height:auto;min-height:112px;padding:8px 12px;resize:vertical;font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:12.5px;line-height:20px}
+.elv-row--stack .elv-control{flex-direction:column;align-items:stretch;gap:6px}
+.elv-count{align-self:flex-end;color:var(--elv-ink-3);font-size:12px;line-height:16px;font-variant-numeric:tabular-nums}
+.elv-count[data-tone=error]{color:var(--elv-error)}
+.elv-unit{display:inline-flex;align-items:center;gap:8px;color:var(--elv-ink-2);font-size:13px}
+.elv-unit .elv-input{width:112px;font-variant-numeric:tabular-nums}
+.elv-preview{display:flex;gap:8px;width:100%}
+.elv-preview .elv-input{flex:1;width:auto}
+.elv-action{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.elv-result{max-width:260px;color:var(--elv-ink-2);font-size:12px;line-height:18px;text-align:right;overflow-wrap:anywhere}
+.elv-result[data-tone=error]{color:var(--elv-error)}
+.elv-btn{display:inline-flex;align-items:center;justify-content:center;flex:none;height:32px;padding:0 14px;border:1px solid var(--elv-line);border-radius:8px;background:transparent;color:var(--elv-ink);font:inherit;font-size:13px;font-weight:500;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease}
+.elv-btn:hover:not(:disabled){background:var(--elv-hover);border-color:var(--elv-rail)}
+.elv-btn--primary{border-color:transparent;background:var(--elv-fill-btn);color:var(--elv-on-fill)}
+.elv-btn--primary:hover:not(:disabled){border-color:transparent;background:var(--elv-fill-btn);filter:brightness(1.08)}
+.elv-btn:disabled{cursor:default;opacity:.45}
+.elv-text-btn{flex:none;padding:2px 0;border:0;background:transparent;color:var(--elv-ink-2);font:inherit;font-size:12px;cursor:pointer}
+.elv-text-btn:hover{color:var(--elv-ink)}
+.elv-switch{position:relative;flex:none;width:36px;height:20px;margin:0;padding:0;border:0;border-radius:999px;background:var(--elv-rail);cursor:pointer;transition:background-color .18s ease}
+.elv-switch-thumb{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--elv-card);box-shadow:0 1px 2px rgb(20 20 19 / 18%);transition:translate .18s ease}
+.elv-switch[aria-checked=true]{background:var(--elv-fill-btn)}
+.elv-switch[aria-checked=true] .elv-switch-thumb{translate:16px 0;background:var(--elv-on-fill)}
+.elv-chip{display:inline-flex;align-items:center;gap:6px;padding:1px 10px;border-radius:999px;background:var(--elv-chip);color:var(--elv-ink);font-size:12px;line-height:20px;white-space:nowrap}
+.elv-chip::before{content:"";width:6px;height:6px;border-radius:50%;background:#2f9461}
+.elv-chip[data-tone=error]::before{background:var(--elv-error)}
+.elv-range{display:inline-flex;align-items:center;gap:12px;width:240px;max-width:100%}
+.elv-range output{min-width:38px;color:var(--elv-ink-2);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.elv-range input{flex:1;min-width:0;height:20px;margin:0;background:transparent;appearance:none;cursor:pointer}
+.elv-range input::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(to right,var(--elv-brand) var(--elv-fill,0%),color-mix(in srgb,var(--elv-ink) 12%,transparent) var(--elv-fill,0%))}
+.elv-range input::-webkit-slider-thumb{width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgb(0 0 0 / 12%),0 1px 3px rgb(0 0 0 / 25%);appearance:none}
+.elv-range input::-moz-range-track{height:4px;border-radius:999px;background:color-mix(in srgb,var(--elv-ink) 12%,transparent)}
+.elv-range input::-moz-range-progress{height:4px;border-radius:999px;background:var(--elv-brand)}
+.elv-range input::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgb(0 0 0 / 12%),0 1px 3px rgb(0 0 0 / 25%)}
+.elv-settings :is(.elv-btn,.elv-text-btn,.elv-switch,.elv-range input):focus-visible{outline:2px solid var(--elv-brand);outline-offset:2px}
+.elv-savebar{position:sticky;bottom:12px;z-index:1;display:flex;align-items:center;gap:8px;padding:10px 12px 10px 16px;border:1px solid var(--elv-line);border-radius:12px;background:var(--elv-card);box-shadow:0 4px 16px rgb(20 20 19 / 8%)}
+.elv-savebar-text{flex:1;min-width:0;color:var(--elv-ink-2);font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.elv-savebar[data-dirty] .elv-savebar-text{color:var(--elv-ink)}
+.elv-savebar[data-dirty] .elv-savebar-text:not([data-tone])::before{content:"";display:inline-block;width:7px;height:7px;margin-right:8px;border-radius:50%;background:var(--elv-brand);vertical-align:1px}
+.elv-savebar-text[data-tone=error]{color:var(--elv-error)}
+@container elv-settings (max-width:520px){.elv-row:not(.elv-row--inline){grid-template-columns:minmax(0,1fr);grid-template-areas:"label" "hint" "control";row-gap:4px}.elv-row:not(.elv-row--inline)>.elv-control{margin-top:8px;justify-self:stretch}.elv-input,.elv-range{width:100%}.elv-action{align-items:stretch}.elv-result{max-width:none;text-align:left}.elv-card-head{align-items:flex-start}}
+@media (prefers-reduced-motion:reduce){.elv-switch,.elv-switch-thumb,.elv-btn{transition:none}}
+`;
         document.head.append(style);
         const register = (slot, id, component, inject) =>
           ctx.effect(() =>

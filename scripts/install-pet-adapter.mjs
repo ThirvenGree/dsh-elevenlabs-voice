@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { planAdapter } from "./pet-adapter-plan.mjs";
 const target = path.resolve(process.argv[2] || "");
 if (!process.argv[2])
   throw Error(
@@ -18,48 +19,7 @@ const manifest = JSON.parse(
     "utf8",
   ),
 );
-const allowed = new Set([
-  "src/host/index.ts",
-  "src/client/pet.ts",
-  "src/shared/menu.ts",
-  "src/shared/index.ts",
-  "runtime/electron-helper/sprite.js",
-  "src/client/settings.ts",
-  "../API.md",
-  "../CONFIG.md",
-  "../openapi.yaml",
-  "src/host/voice-stream.ts",
-  "src/host/voice-stream.test.ts",
-  "src/shared/voice-panel.ts",
-]);
-const pending = [];
-for (const item of manifest.files) {
-  if (!allowed.has(item.file)) throw Error("适配清单存在未授权路径");
-  const file = path.resolve(target, item.file);
-  let current = fs.existsSync(file)
-    ? fs.readFileSync(file, "utf8").replaceAll("\r\n", "\n")
-    : "";
-  const original = current;
-  if (item.create) {
-    if (current && current !== item.create)
-      throw Error("新模块已经存在且内容不同：" + item.file);
-    current = item.create;
-  } else
-    for (const edit of item.edits) {
-      if (current.includes(edit.after)) continue;
-      const parts = current.split(edit.before);
-      if (parts.length !== 2)
-        throw Error("源码与适配版本不符，未改写任何文件：" + item.file);
-      current = parts.join(edit.after);
-    }
-  if (current !== original)
-    pending.push({
-      file,
-      original,
-      current,
-      name: item.file.replaceAll("../", "outer/"),
-    });
-}
+const pending = planAdapter(target, manifest);
 if (process.argv.includes("--check")) {
   console.log("适配检查通过，需要更新 " + pending.length + " 个文件");
   process.exit(0);

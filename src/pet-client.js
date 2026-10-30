@@ -1,7 +1,12 @@
 import { Conversation } from "@elevenlabs/client";
 import { chunks } from "./shared.js";
-const background =
-  new URLSearchParams(location.search).get("background") === "1";
+const params = new URLSearchParams(location.search);
+const background = params.get("background") === "1";
+// The floating window passes the host page's theme; without it the panel
+// follows the system setting.
+if (["dark", "light"].includes(params.get("theme")))
+  document.documentElement.dataset.theme = params.get("theme");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 let unloading = false;
 const $ = (id) => document.getElementById(id),
   token = location.pathname.split("/")[2],
@@ -21,12 +26,58 @@ let conversation = null,
   lastLine = "",
   playback = 0,
   finishAudio = null,
-  dictating = false;
-const status = (text) => {
+  dictating = false,
+  mode = "listening",
+  level = 0,
+  levelFrame = 0;
+const status = (text, tone = "") => {
   $("status").textContent = text;
+  $("status").dataset.tone = tone;
 };
+// What the talk button shows. Its colour says who is talking.
+const CALL = {
+  idle: ["开始实时对话", "点击后才会开启麦克风", "开始实时对话"],
+  connecting: ["正在连接…", "第一次连接需要几秒", "取消连接"],
+  reconnecting: ["正在重连…", "连接断开了，正在自动恢复", "停止重连"],
+  listening: ["正在聆听", "直接说话；开口也能打断 Pet", "结束实时对话"],
+  speaking: ["Pet 正在说话", "开口可以打断，点击按钮结束对话", "结束实时对话"],
+  playing: ["正在朗读", "点击按钮停止朗读", "停止朗读"],
+  paused: ["已暂停", "DSH 正在听写，结束后自动恢复", "结束实时对话"],
+};
+function phase() {
+  if (dictating && (conversation || wanted)) return "paused";
+  if (conversation) return mode === "speaking" ? "speaking" : "listening";
+  if (wanted) return retries > 0 ? "reconnecting" : "connecting";
+  if (audio) return "playing";
+  return "idle";
+}
+function renderCall() {
+  const p = phase(),
+    [title, hint, action] = CALL[p];
+  document.body.dataset.call = p;
+  $("call-title").textContent = title;
+  $("call-hint").textContent = hint;
+  $("orb").setAttribute("aria-label", action);
+  if (conversation && !levelFrame && !reducedMotion)
+    levelFrame = requestAnimationFrame(tickLevel);
+}
+// The ring follows your voice while listening and the Pet's while speaking.
+function tickLevel() {
+  levelFrame = 0;
+  let value = 0;
+  if (conversation && !dictating)
+    try {
+      value =
+        mode === "speaking"
+          ? conversation.getOutputVolume()
+          : conversation.getInputVolume();
+    } catch {}
+  level += (Math.min(1, value * 1.8) - level) * 0.25;
+  $("orb").style.setProperty("--level", level.toFixed(3));
+  if (conversation) levelFrame = requestAnimationFrame(tickLevel);
+}
 function playbackError(error) {
-  status(error.message);
+  status(error.message, "error");
   if (background)
     void api("notice", {
       text: "Pet 语音播放失败：" + String(error.message).slice(0, 400),
@@ -36,7 +87,6 @@ const send = (value) => {
   if (ws?.readyState === 1) ws.send(JSON.stringify(value));
 };
 const speaking = (active) => {
-  $("speaking").textContent = active ? "· 正在说话" : "";
   send({ type: "speaking", active });
   clearInterval(heartbeat);
   if (active)
@@ -44,6 +94,7 @@ const speaking = (active) => {
       () => send({ type: "speaking", active: true }),
       5000,
     );
+  renderCall();
 };
 async function api(route, data, signal) {
   const response = await fetch(base + route, {
@@ -58,14 +109,29 @@ async function api(route, data, signal) {
   }
   return response;
 }
+function emptyLog() {
+  const p = document.createElement("p");
+  p.className = "pv-empty";
+  p.textContent = "点击上面的圆形按钮开始说话，或在下面输入文字。";
+  $("log").replaceChildren(p);
+  syncClear();
+}
+// Returns the text node's element so streamed deltas can append to it.
 function line(role, text) {
-  const el = document.createElement("div");
-  el.className = role;
-  el.textContent = (role === "user" ? "你：" : "Pet：") + text;
+  $("log").querySelector(".pv-empty")?.remove();
+  const el = document.createElement("div"),
+    who = document.createElement("span"),
+    body = document.createElement("span");
+  el.className = "pv-msg " + (role === "user" ? "pv-msg--user" : "pv-msg--pet");
+  who.className = "pv-sr";
+  who.textContent = role === "user" ? "你：" : "Pet：";
+  body.textContent = text;
+  el.append(who, body);
   $("log").append(el);
   while ($("log").children.length > 80) $("log").firstChild.remove();
   $("log").scrollTop = $("log").scrollHeight;
-  return el;
+  syncClear();
+  return body;
 }
 function stopAudio() {
   playback++;
@@ -95,12 +161,7 @@ function setDictating(active) {
   dictating = active;
   if (active) stopAudio();
   applyDictation();
-  if (conversation)
-    status(
-      active
-        ? "DSH 听写中，Pet 暂停收听"
-        : "实时对话已恢复，可以说话；再次说话可打断。",
-    );
+  renderCall();
 }
 async function say(text) {
   stopAudio();
@@ -120,8 +181,8 @@ async function say(text) {
     await new Promise((resolve, reject) => {
       finishAudio = resolve;
       audio.onplaying = () => {
+        status("");
         speaking(true);
-        status("正在朗读…");
       };
       audio.onended = resolve;
       audio.onerror = () => reject(Error("音频播放失败"));
@@ -142,19 +203,19 @@ async function stop(notify = true) {
   if (notify) send({ type: "stop" });
   const current = conversation;
   conversation = null;
+  renderCall();
   if (current) await current.endSession().catch(() => {});
   if (notify) await api("stop", {}).catch(() => {});
-  status("已停止");
 }
 async function start(reconnecting = false) {
   if (!reconnecting) {
     await stop();
     wanted = true;
     retries = 0;
+    status("");
   }
   const version = ++generation;
-  status(reconnecting ? "正在重连…" : "正在建立语音连接…");
-  $("start").disabled = true;
+  renderCall();
   try {
     const response = await api("session", {}),
       result = await response.json();
@@ -164,39 +225,44 @@ async function start(reconnecting = false) {
       connectionType: "websocket",
       onConnect: () => {
         retries = 0;
-        status("实时对话已连接，可以说话；再次说话可打断。");
+        status("");
+        renderCall();
       },
       onDisconnect: () => {
-        speaking(false);
         conversation = null;
+        speaking(false);
         if (wanted && version === generation) {
           if (retries < 3) {
             retry = setTimeout(
               () => void start(true),
               [1500, 4000, 10000][retries++],
             );
-            status("连接断开，准备重连…");
           } else {
             wanted = false;
-            status("重连未成功，请点击开始重试");
+            status("连续三次重连失败，请点击圆形按钮重试", "error");
           }
         }
+        renderCall();
       },
-      onModeChange: ({ mode }) => speaking(mode === "speaking"),
-      onError: (message) => status("语音服务：" + message),
+      onModeChange: ({ mode: next }) => {
+        mode = next;
+        speaking(next === "speaking");
+      },
+      onError: (message) => status("语音服务：" + message, "error"),
     });
     if (!wanted || version !== generation) {
       await next.endSession();
       return;
     }
     conversation = next;
+    mode = "listening";
     conversation.setVolume({ volume });
     applyDictation();
+    renderCall();
   } catch (error) {
     wanted = false;
-    status("连接失败：" + error.message);
-  } finally {
-    $("start").disabled = false;
+    status("连接失败：" + error.message, "error");
+    renderCall();
   }
 }
 async function refresh() {
@@ -204,20 +270,30 @@ async function refresh() {
   volume = result.settings.volume;
   lastLine = result.lastLine;
   $("model").textContent =
-    "跟随 DSH：" + result.model.provider + " / " + result.model.model;
+    (result.settings.provider
+      ? "当前：这只 Pet 指定 · "
+      : "当前：跟随 DSH · ") +
+    result.model.provider +
+    " / " +
+    result.model.model;
   for (const [name, value] of Object.entries(result.settings)) {
     const field = $("settings").elements.namedItem(name);
     if (!field) continue;
     if (field.type === "checkbox") field.checked = value;
     else field.value = value;
   }
-  $("log").replaceChildren();
-  for (const message of result.history) line(message.role, message.content);
-  status(
-    result.keyPresent
-      ? "就绪 · 点击开始后才会启用麦克风"
-      : "缺少 ELEVENLABS_API_KEY，请设置后重启 DSH",
-  );
+  showVolume();
+  if (result.history.length) {
+    $("log").replaceChildren();
+    for (const message of result.history) line(message.role, message.content);
+  } else emptyLog();
+  if (!result.keyPresent)
+    status("缺少 ELEVENLABS_API_KEY，请设置后重启 DSH", "error");
+}
+function showVolume() {
+  const percent = Math.round(Number($("volume").value) * 100) + "%";
+  $("volume").style.setProperty("--fill", percent);
+  $("volume-out").textContent = percent;
 }
 // A single owner per Pet prevents desktop and web from speaking the same line twice.
 function connectUi() {
@@ -232,7 +308,7 @@ function connectUi() {
     if (m.type === "owner" && background) void refresh().catch(playbackError);
     if (m.type === "disabled") {
       void stop();
-      status("统一语音已关闭");
+      status("统一语音已关闭", "error");
     }
     if (m.type === "user") {
       liveReply = null;
@@ -248,7 +324,7 @@ function connectUi() {
       lastLine = m.text;
     }
     if (m.type === "task") showTask(m);
-    if (m.type === "error") status(m.error);
+    if (m.type === "error") status(m.error, "error");
     if (m.type === "dictation") setDictating(m.active === true);
     if (m.type === "speak" && !wanted && !audio && !dictating)
       void say(m.text).catch(playbackError);
@@ -259,41 +335,90 @@ function connectUi() {
       retry = setTimeout(connectUi, 5000);
       return;
     }
-    if (event.code === 4001) status("语音面板已在另一端打开");
-    else status("本机连接已断开，请重新打开面板");
+    status(
+      event.code === 4001
+        ? "语音面板已在另一端打开"
+        : "本机连接已断开，请重新打开面板",
+      "error",
+    );
   };
 }
-$("start").onclick = () => void start();
-$("stop").onclick = () => void stop();
-$("speak").onclick = () => {
-  void stop()
-    .then(() => say($("text").value))
-    .catch((error) => status(error.message));
+$("orb").onclick = () => {
+  if (phase() === "idle") void start();
+  else void stop();
 };
-$("chat").onclick = async () => {
+$("speak").onclick = () => {
+  const text = $("text").value.trim();
+  if (!text) {
+    status("先在输入框里写下要朗读的文字");
+    $("text").focus();
+    return;
+  }
+  void stop()
+    .then(() => say(text))
+    .catch((error) => status(error.message, "error"));
+};
+async function chat() {
   const text = $("text").value.trim();
   if (!text) return;
   try {
     if (conversation) {
       conversation.sendUserMessage(text);
       $("text").value = "";
+      growComposer();
       return;
     }
     request?.abort();
     request = new AbortController();
     stopAudio();
-    status("正在回复…");
+    status("Pet 正在回复…");
     $("chat").disabled = true;
     const response = await api("chat", { text }, request.signal);
     const result = await response.json();
     $("text").value = "";
+    growComposer();
     await say(result.text);
   } catch (error) {
-    status(error.name === "AbortError" ? "已取消" : error.message);
+    status(
+      error.name === "AbortError" ? "已取消" : error.message,
+      error.name === "AbortError" ? "" : "error",
+    );
   } finally {
     $("chat").disabled = false;
   }
-};
+}
+$("chat").onclick = () => void chat();
+function growComposer() {
+  const text = $("text");
+  text.style.height = "auto";
+  text.style.height = Math.min(text.scrollHeight + 2, 128) + "px";
+}
+$("text").addEventListener("input", growComposer);
+$("text").addEventListener("keydown", (event) => {
+  // Enter sends; Shift+Enter breaks the line; an IME composition keeps Enter.
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    void chat();
+  }
+});
+$("volume").addEventListener("input", showVolume);
+function selectTab(name) {
+  for (const tab of ["chat", "settings"]) {
+    const on = tab === name;
+    $("tab-" + tab).setAttribute("aria-selected", String(on));
+    $("tab-" + tab).tabIndex = on ? 0 : -1;
+    $("panel-" + tab).hidden = !on;
+  }
+}
+$("tab-chat").onclick = () => selectTab("chat");
+$("tab-settings").onclick = () => selectTab("settings");
+for (const id of ["tab-chat", "tab-settings"])
+  $(id).addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const next = id === "tab-chat" ? "settings" : "chat";
+    selectTab(next);
+    $("tab-" + next).focus();
+  });
 $("settings").onsubmit = async (event) => {
   event.preventDefault();
   try {
@@ -310,21 +435,47 @@ $("settings").onsubmit = async (event) => {
     }
     await api("settings", data);
     await refresh();
-    status("设置已保存");
+    status("设置已保存", "ok");
   } catch (error) {
-    status(error.message);
+    status(error.message, "error");
   }
 };
+// Clearing asks twice inline instead of a native dialog, which some desktop
+// pet windows cannot show. It removes this Pet's recent conversation so it
+// does not come back on reopen; DSH long-term memory is kept.
+let clearArmed = null;
+function disarmClear() {
+  clearTimeout(clearArmed);
+  clearArmed = null;
+  $("clear").textContent = "清空对话";
+  delete $("clear").dataset.armed;
+}
 $("clear").onclick = async () => {
-  if (!confirm("清空本 Pet 最近记录？DSH 长期记忆会保留。")) return;
+  if (!clearArmed) {
+    $("clear").textContent = "确认清空";
+    $("clear").dataset.armed = "";
+    status("再点一次清空这只 Pet 的最近对话；DSH 长期记忆不受影响");
+    clearArmed = setTimeout(() => {
+      disarmClear();
+      status("");
+    }, 4000);
+    return;
+  }
+  disarmClear();
   try {
     await stop();
     await api("clear", {});
     await refresh();
+    $("tasks").replaceChildren();
+    status("对话已清空，DSH 长期记忆保留", "ok");
   } catch (error) {
-    status(error.message);
+    status(error.message, "error");
   }
 };
+// Nothing to clear while the log is empty.
+function syncClear() {
+  $("clear").disabled = !$("log").querySelector(".pv-msg");
+}
 window.addEventListener("pagehide", () => {
   unloading = true;
   clearTimeout(retry);
@@ -336,31 +487,66 @@ window.addEventListener("pagehide", () => {
   send({ type: "stop" });
   ws?.close();
 });
-connectUi();
-if (!background) void refresh().catch((error) => status(error.message));
-
+function duration(seconds) {
+  if (seconds < 60) return seconds + " 秒";
+  if (seconds < 3600)
+    return (
+      Math.floor(seconds / 60) +
+      " 分钟" +
+      (seconds % 60 ? " " + (seconds % 60) + " 秒" : "")
+    );
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return (
+    Math.floor(seconds / 3600) +
+    " 小时" +
+    (minutes ? " " + minutes + " 分钟" : "")
+  );
+}
 function showTask(m) {
-  const button = document.createElement("button");
-  button.textContent =
+  const card = document.createElement("div"),
+    text = document.createElement("p"),
+    actions = document.createElement("div"),
+    ignore = document.createElement("button"),
+    confirm = document.createElement("button");
+  card.className = "pv-task";
+  card.setAttribute("role", "group");
+  card.setAttribute("aria-label", "Pet 的提议");
+  text.textContent =
     m.task.type === "timer"
-      ? "确认计时 " + m.task.seconds + " 秒：" + m.task.label
-      : "确认打开 " + m.task.url;
-  button.onclick = async () => {
+      ? "Pet 想设一个 " + duration(m.task.seconds) + " 的计时：" + m.task.label
+      : "Pet 想打开网页：" + m.task.url;
+  actions.className = "pv-task-actions";
+  ignore.type = confirm.type = "button";
+  ignore.className = "pv-btn";
+  ignore.textContent = "忽略";
+  ignore.onclick = () => card.remove();
+  confirm.className = "pv-btn pv-primary";
+  confirm.textContent = m.task.type === "timer" ? "开始计时" : "打开网页";
+  confirm.onclick = async () => {
     try {
-      if (m.task.type === "url") {
-        window.open(m.task.url, "_blank", "noopener");
-        await api("task", { taskId: m.taskId });
-      } else await api("task", { taskId: m.taskId });
-      button.remove();
-      status("已执行确认的简单任务");
+      if (m.task.type === "url") window.open(m.task.url, "_blank", "noopener");
+      await api("task", { taskId: m.taskId });
+      card.remove();
+      status(m.task.type === "timer" ? "计时已开始" : "网页已打开", "ok");
     } catch (error) {
-      status(error.message);
+      status(error.message, "error");
     }
   };
-  $("tasks").replaceChildren(button);
+  actions.append(ignore, confirm);
+  card.append(text, actions);
+  $("tasks").replaceChildren(card);
 }
 $("last").onclick = () => {
+  if (!lastLine) {
+    status("Pet 还没有说过台词");
+    return;
+  }
   void stop()
     .then(() => say(lastLine))
-    .catch((error) => status(error.message));
+    .catch((error) => status(error.message, "error"));
 };
+emptyLog();
+renderCall();
+connectUi();
+if (!background)
+  void refresh().catch((error) => status(error.message, "error"));

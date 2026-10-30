@@ -1,6 +1,6 @@
 {
   "name": "dsh-elevenlabs-voice",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Unified ElevenLabs DSH dictation, reply playback and Pet realtime voice",
   "type": "module",
   "main": "src/host.js",
@@ -17,7 +17,8 @@
     "ACCEPTANCE.md",
     "LICENSE",
     "integrations",
-    "scripts/install-pet-adapter.mjs"
+    "scripts/install-pet-adapter.mjs",
+    "scripts/pet-adapter-plan.mjs"
   ],
   "dsh": {
     "bundle": {
