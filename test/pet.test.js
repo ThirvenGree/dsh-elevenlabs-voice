@@ -39,16 +39,17 @@ test("upstream rejects expired, forged, wrong issuer and wrong algorithm tokens"
   ])
     assert.equal(validUpstreamJwt(token, key, now), false);
 });
-test("autonomous voice is opt in, quiet 2-6, cooldown and hourly budget enforced", () => {
+test("automatic reading is opt in and covers output without time or rate suppression", () => {
   const now = new Date(2026, 9, 29, 12).getTime(),
     c = petConfig({ autonomous: true });
   assert.equal(canSpeakAutomatically(petConfig(), [], now), false);
   assert.equal(canSpeakAutomatically(c, [], now), true);
   assert.equal(
     canSpeakAutomatically(c, [], new Date(2026, 9, 29, 3).getTime()),
-    false,
+    true,
   );
-  assert.equal(canSpeakAutomatically(c, [now - 1000], now), false);
+  assert.equal(canSpeakAutomatically(c, [now - 1000], now), true);
+  assert.equal(canSpeakAutomatically({ ...c, enabled: false }), false);
   assert.throws(() => petConfig({ provider: "x" }));
   assert.throws(() => petConfig({ key: "secret" }));
 });
@@ -338,4 +339,62 @@ test("DSH dictation pauses the Pet panel as an ordered, expiring lease", async (
     await host.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("host subscribes every output and retains busy or disconnected playback until acknowledgement", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "dsh-pet-output-"));
+  let observe,
+    unsubscribed = false;
+  const bridge = {
+    describe: () => ({}),
+    events: () => [],
+    speaking() {},
+    watchSay: (fn) => {
+      observe = fn;
+      return () => {
+        unsubscribed = true;
+      };
+    },
+  };
+  const host = new PetVoiceHost({ get: () => bridge }, dir, () => ({
+    enabled: true,
+  }));
+  let socket;
+  try {
+    await host.ready;
+    host.saved.main = petConfig({ autonomous: true });
+    await host.tick();
+    observe({ petId: "main", counter: 1, data: { text: "先说的" } });
+    observe({ petId: "main", counter: 2, data: { text: "紧接着" } });
+    const { url } = await host.panel("main");
+    socket = new WebSocket(url.replace("http:", "ws:") + "socket");
+    const messages = [];
+    socket.on("message", (b) => messages.push(JSON.parse(b)));
+    await new Promise((r) => socket.once("open", r));
+    socket.send(JSON.stringify({ type: "reading-ready", active: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    host.jobs.set("main", new AbortController());
+    await host.tick();
+    assert.equal(messages.filter((m) => m.type === "speak").length, 0);
+    host.jobs.delete("main");
+    await host.tick();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(
+      messages.filter((m) => m.type === "speak").map((m) => m.text),
+      ["先说的"],
+    );
+    socket.send(JSON.stringify({ type: "read-result", id: 1 }));
+    await new Promise((r) => setTimeout(r, 20));
+    await host.tick();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(
+      messages.filter((m) => m.type === "speak").map((m) => m.text),
+      ["先说的", "紧接着"],
+    );
+  } finally {
+    socket?.terminate();
+    await host.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+  assert.equal(unsubscribed, true);
 });

@@ -45,7 +45,13 @@ export function planAdapter(target, manifest) {
     } else
       for (const edit of item.edits) {
         if (current.includes(edit.after)) continue;
-        const parts = current.split(edit.before);
+        const candidates = [edit.before, ...(edit.beforeVariants || [])];
+        const matches = candidates.filter(
+          (before) => current.split(before).length === 2,
+        );
+        if (matches.length !== 1)
+          throw Error("源码与适配版本不符，未改写任何文件：" + item.file);
+        const parts = current.split(matches[0]);
         if (parts.length !== 2)
           throw Error("源码与适配版本不符，未改写任何文件：" + item.file);
         current = parts.join(edit.after);

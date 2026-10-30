@@ -7,6 +7,7 @@ import { fetch, ProxyAgent } from "undici";
 import { VoiceCore, providerError } from "./core.js";
 import { PetTunnel, UpstreamTokenGuard } from "./pet-tunnel.js";
 import { petConfig, canSpeakAutomatically } from "./pet-config.js";
+import { PetReadingQueue } from "./pet-reading.js";
 import { parsePetTask, withoutPetTask } from "./pet-tasks.js";
 
 const listen = (server) =>
@@ -41,7 +42,8 @@ export class PetVoiceHost {
     this.engines = new Map();
     this.cores = new Map();
     this.counters = new Map();
-    this.rates = new Map();
+    this.reading = new PetReadingQueue();
+    this.readiness = new Map();
     this.routes = new Map();
     this.closed = false;
     this.upstreamOwners = new Map();
@@ -328,13 +330,19 @@ export class PetVoiceHost {
     this.sockets.get(id)?.close(4001, "已在另一端打开语音");
     this.stop(id);
     this.sockets.set(id, ws);
+    this.readiness.set(id, false);
     this.send(id, { type: "owner" });
     // Always report the current state: a panel that reconnects may have
     // missed the end of a dictation.
     this.send(id, { type: "dictation", active: this.dictating });
     ws.on("message", (bytes) => {
       try {
+        if (this.sockets.get(id) !== ws) return;
         const m = JSON.parse(bytes);
+        if (m.type === "reading-ready")
+          this.readiness.set(id, m.active === true);
+        if (m.type === "read-result")
+          this.reading.finish(id, ws, m.id, m.retry === true);
         if (m.type === "speaking")
           this.bridge().speaking(id, m.active === true);
         if (m.type === "stop") this.stop(id);
@@ -530,9 +538,15 @@ export class PetVoiceHost {
       if (req.method !== "POST") return json(res, { error: "接口不存在" }, 404);
       const data = await body(req);
       if (route === "settings") {
-        this.saved[id] = petConfig(data);
+        this.saved[id] = petConfig({ ...this.settings(id), ...data });
+        if (!canSpeakAutomatically(this.saved[id])) this.reading.clear(id);
+        this.send(id, {
+          type: "reading-setting",
+          enabled: canSpeakAutomatically(this.saved[id]),
+        });
         this.persist();
-        this.stop(id);
+        if (Object.keys(data).some((key) => key !== "autonomous"))
+          this.stop(id);
         return json(res, { ok: true });
       }
       if (route === "session") return json(res, await this.signed(id));
@@ -559,7 +573,15 @@ export class PetVoiceHost {
             try {
               this.bridge().say(id, "计时结束：" + task.label);
             } catch {}
-            this.send(id, { type: "speak", text: "计时结束：" + task.label });
+            if (
+              this.config().enabled &&
+              canSpeakAutomatically(this.settings(id))
+            )
+              this.reading.enqueue(
+                id,
+                "timer:" + data.taskId,
+                "计时结束：" + task.label,
+              );
           }, task.seconds * 1000);
         timer.unref();
         this.timers.add(timer);
@@ -664,30 +686,39 @@ export class PetVoiceHost {
     for (const [taskId, offer] of this.taskOffers)
       if (offer.expires < Date.now()) this.taskOffers.delete(taskId);
     for (const event of events) {
-      const previous = this.counters.get(event.petId);
+      const baseline = !this.counters.has(event.petId);
       this.counters.set(event.petId, event.counter);
+      this.reading.observe(
+        event,
+        this.config().enabled &&
+          canSpeakAutomatically(this.settings(event.petId)),
+        baseline,
+      );
+    }
+    if (!this.unwatch && this.bridge().watchSay) {
+      this.unwatch = this.bridge().watchSay((event) => {
+        this.counters.set(event.petId, event.counter);
+        this.reading.observe(
+          event,
+          this.config().enabled &&
+            canSpeakAutomatically(this.settings(event.petId)),
+        );
+      });
+    }
+    for (const [id, owner] of this.sockets) {
+      if (!this.config().enabled || !canSpeakAutomatically(this.settings(id))) {
+        this.reading.clear(id);
+        continue;
+      }
       if (
-        previous === undefined ||
-        previous === event.counter ||
-        event.data?.voiceProduced ||
-        !event.data?.text ||
-        !this.sockets.has(event.petId) ||
-        this.jobs.has(event.petId) ||
-        this.dictating
+        !this.readiness.get(id) ||
+        this.dictating ||
+        this.jobs.has(id) ||
+        this.upstreamOwners.has(id)
       )
         continue;
-      const c = this.settings(event.petId),
-        recent = this.rates.get(event.petId) || [];
-      if (!this.config().enabled || !canSpeakAutomatically(c, recent)) continue;
-      recent.push(Date.now());
-      this.rates.set(
-        event.petId,
-        recent.filter((t) => Date.now() - t < 3600000),
-      );
-      this.send(event.petId, {
-        type: "speak",
-        text: String(event.data.text).slice(0, 2400),
-      });
+      const item = this.reading.next(id, owner);
+      if (item) this.send(id, item);
     }
     if (!live && !this.startingSessions.size && this.tunnel?.current) {
       this.idleSince ??= Date.now();
@@ -706,6 +737,7 @@ export class PetVoiceHost {
   }
   async close() {
     this.closed = true;
+    this.unwatch?.();
     clearInterval(this.interval);
     for (const timer of this.timers) clearTimeout(timer);
     for (const id of this.sockets.keys()) this.stop(id);

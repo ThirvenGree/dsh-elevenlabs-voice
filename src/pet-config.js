@@ -54,13 +54,7 @@ export function petConfig(input = {}) {
     throw Error("单次对话时长应为 1–60 分钟");
   return c;
 }
-export function canSpeakAutomatically(c, recent, now = Date.now()) {
-  const hour = new Date(now).getHours();
-  return (
-    c.enabled &&
-    c.autonomous &&
-    !(hour >= 2 && hour < 6) &&
-    (!recent.length || now - recent.at(-1) >= c.cooldownMinutes * 60000) &&
-    recent.filter((t) => now - t < 3600000).length < c.hourlyLimit
-  );
+// Legacy frequency fields remain readable for migration; they no longer drop output.
+export function canSpeakAutomatically(c) {
+  return c.enabled && c.autonomous;
 }

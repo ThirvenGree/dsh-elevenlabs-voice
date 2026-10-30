@@ -8,6 +8,25 @@ if (["dark", "light"].includes(params.get("theme")))
   document.documentElement.dataset.theme = params.get("theme");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 let unloading = false;
+let reading = false,
+  synthesizing = false,
+  chatBusy = false,
+  readingEnabled = false;
+let selectedMode = "realtime";
+function readingReady() {
+  send({
+    type: "reading-ready",
+    active:
+      !unloading &&
+      !wanted &&
+      !audio &&
+      !synthesizing &&
+      !chatBusy &&
+      !dictating &&
+      !reading,
+  });
+}
+const readinessTimer = setInterval(readingReady, 500);
 const $ = (id) => document.getElementById(id),
   token = location.pathname.split("/")[2],
   base = location.pathname;
@@ -159,39 +178,52 @@ function applyDictation() {
 function setDictating(active) {
   if (active === dictating) return;
   dictating = active;
-  if (active) stopAudio();
+  if (active) {
+    request?.abort();
+    stopAudio();
+  }
   applyDictation();
   renderCall();
 }
 async function say(text) {
-  stopAudio();
-  status("正在生成语音…");
-  request?.abort();
-  request = new AbortController();
-  const version = playback,
-    signal = request.signal;
-  for (const part of chunks(text, 2300)) {
-    const response = await api("tts", { text: part }, signal),
-      blob = await response.blob();
-    if (version !== playback || signal.aborted) return;
-    if (audioUrl) URL.revokeObjectURL(audioUrl);
-    audioUrl = URL.createObjectURL(blob);
-    audio = new Audio(audioUrl);
-    audio.volume = volume;
-    await new Promise((resolve, reject) => {
-      finishAudio = resolve;
-      audio.onplaying = () => {
-        status("");
-        speaking(true);
-      };
-      audio.onended = resolve;
-      audio.onerror = () => reject(Error("音频播放失败"));
-      audio.play().catch(reject);
-    });
-    if (version !== playback) return;
+  synthesizing = true;
+  try {
+    stopAudio();
+    status("正在生成语音…");
+    request?.abort();
+    request = new AbortController();
+    const version = playback,
+      signal = request.signal;
+    for (const part of chunks(text, 2300)) {
+      const response = await api("tts", { text: part }, signal),
+        blob = await response.blob();
+      if (version !== playback || signal.aborted) return false;
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+      audioUrl = URL.createObjectURL(blob);
+      audio = new Audio(audioUrl);
+      audio.volume = volume;
+      await new Promise((resolve, reject) => {
+        finishAudio = resolve;
+        audio.onplaying = () => {
+          status("");
+          speaking(true);
+        };
+        audio.onended = resolve;
+        audio.onerror = () => reject(Error("音频播放失败"));
+        audio.play().catch(reject);
+      });
+      if (version !== playback) return false;
+    }
+    stopAudio();
+    status("朗读完成");
+    return true;
+  } catch (error) {
+    stopAudio();
+    throw error;
+  } finally {
+    synthesizing = false;
+    readingReady();
   }
-  stopAudio();
-  status("朗读完成");
 }
 async function stop(notify = true) {
   wanted = false;
@@ -224,11 +256,13 @@ async function start(reconnecting = false) {
       signedUrl: result.signedUrl,
       connectionType: "websocket",
       onConnect: () => {
+        if (version !== generation) return;
         retries = 0;
         status("");
         renderCall();
       },
       onDisconnect: () => {
+        if (version !== generation) return;
         conversation = null;
         speaking(false);
         if (wanted && version === generation) {
@@ -245,10 +279,13 @@ async function start(reconnecting = false) {
         renderCall();
       },
       onModeChange: ({ mode: next }) => {
+        if (version !== generation) return;
         mode = next;
         speaking(next === "speaking");
       },
-      onError: (message) => status("语音服务：" + message, "error"),
+      onError: (message) => {
+        if (version === generation) status("语音服务：" + message, "error");
+      },
     });
     if (!wanted || version !== generation) {
       await next.endSession();
@@ -260,14 +297,17 @@ async function start(reconnecting = false) {
     applyDictation();
     renderCall();
   } catch (error) {
+    if (version !== generation) return;
     wanted = false;
     status("连接失败：" + error.message, "error");
     renderCall();
   }
 }
-async function refresh() {
+async function refresh(includeHistory = true) {
   const result = await (await api("state")).json();
   volume = result.settings.volume;
+  readingEnabled = result.settings.enabled && result.settings.autonomous;
+  $("auto-read").checked = result.settings.autonomous;
   lastLine = result.lastLine;
   $("model").textContent =
     (result.settings.provider
@@ -283,10 +323,10 @@ async function refresh() {
     else field.value = value;
   }
   showVolume();
-  if (result.history.length) {
+  if (includeHistory && result.history.length) {
     $("log").replaceChildren();
     for (const message of result.history) line(message.role, message.content);
-  } else emptyLog();
+  } else if (includeHistory) emptyLog();
   if (!result.keyPresent)
     status("缺少 ELEVENLABS_API_KEY，请设置后重启 DSH", "error");
 }
@@ -326,8 +366,15 @@ function connectUi() {
     if (m.type === "task") showTask(m);
     if (m.type === "error") status(m.error, "error");
     if (m.type === "dictation") setDictating(m.active === true);
-    if (m.type === "speak" && !wanted && !audio && !dictating)
-      void say(m.text).catch(playbackError);
+    if (m.type === "reading-setting") {
+      readingEnabled = m.enabled;
+      $("auto-read").checked = m.enabled;
+      if (!m.enabled && reading) {
+        request?.abort();
+        stopAudio();
+      }
+    }
+    if (m.type === "speak") void readOutput(m);
   };
   ws.onclose = (event) => {
     void stop(false);
@@ -347,20 +394,46 @@ $("orb").onclick = () => {
   if (phase() === "idle") void start();
   else void stop();
 };
-$("speak").onclick = () => {
-  const text = $("text").value.trim();
-  if (!text) {
-    status("先在输入框里写下要朗读的文字");
-    $("text").focus();
+async function readOutput(message) {
+  if (
+    !readingEnabled ||
+    wanted ||
+    audio ||
+    synthesizing ||
+    chatBusy ||
+    dictating ||
+    reading
+  ) {
+    send({ type: "read-result", id: message.id, retry: readingEnabled });
     return;
   }
-  void stop()
-    .then(() => say(text))
-    .catch((error) => status(error.message, "error"));
-};
+  reading = true;
+  lastLine = message.text;
+  try {
+    const completed = await say(message.text);
+    send({
+      type: "read-result",
+      id: message.id,
+      retry: !completed && readingEnabled && (dictating || wanted),
+    });
+  } catch (error) {
+    const interrupted = error.name === "AbortError";
+    if (!interrupted) playbackError(error);
+    send({
+      type: "read-result",
+      id: message.id,
+      retry: interrupted && readingEnabled && (dictating || wanted),
+    });
+  } finally {
+    reading = false;
+    readingReady();
+  }
+}
 async function chat() {
   const text = $("text").value.trim();
-  if (!text) return;
+  if (!text || chatBusy || dictating) return;
+  chatBusy = true;
+  let version = generation;
   try {
     if (conversation) {
       conversation.sendUserMessage(text);
@@ -368,13 +441,15 @@ async function chat() {
       growComposer();
       return;
     }
-    request?.abort();
+    await stop();
+    version = generation;
     request = new AbortController();
     stopAudio();
     status("Pet 正在回复…");
     $("chat").disabled = true;
     const response = await api("chat", { text }, request.signal);
     const result = await response.json();
+    if (version !== generation) return;
     $("text").value = "";
     growComposer();
     await say(result.text);
@@ -384,6 +459,7 @@ async function chat() {
       error.name === "AbortError" ? "" : "error",
     );
   } finally {
+    chatBusy = false;
     $("chat").disabled = false;
   }
 }
@@ -403,11 +479,14 @@ $("text").addEventListener("keydown", (event) => {
 });
 $("volume").addEventListener("input", showVolume);
 function selectTab(name) {
+  $("automatic-panel").hidden = name !== "chat" || selectedMode !== "automatic";
+  $("realtime-panel").hidden = name !== "chat" || selectedMode !== "realtime";
   for (const tab of ["chat", "settings"]) {
     const on = tab === name;
     $("tab-" + tab).setAttribute("aria-selected", String(on));
     $("tab-" + tab).tabIndex = on ? 0 : -1;
-    $("panel-" + tab).hidden = !on;
+    $("panel-" + tab).hidden =
+      !on || (tab === "chat" && selectedMode === "automatic");
   }
 }
 $("tab-chat").onclick = () => selectTab("chat");
@@ -478,6 +557,7 @@ function syncClear() {
 }
 window.addEventListener("pagehide", () => {
   unloading = true;
+  clearInterval(readinessTimer);
   clearTimeout(retry);
   wanted = false;
   generation++;
@@ -550,3 +630,39 @@ renderCall();
 connectUi();
 if (!background)
   void refresh().catch((error) => status(error.message, "error"));
+
+for (const name of ["realtime", "text", "automatic"]) {
+  $("mode-" + name).onclick = async () => {
+    if (selectedMode !== name) await stop();
+    selectedMode = name;
+    selectTab("chat");
+    for (const n of ["realtime", "text", "automatic"])
+      $("mode-" + n).setAttribute("aria-pressed", String(n === name));
+    $("realtime-panel").hidden = name !== "realtime";
+    $("automatic-panel").hidden = name !== "automatic";
+    $("panel-chat").hidden = name === "automatic";
+    $("panel-settings").hidden = true;
+    if (name === "text") $("text").focus();
+  };
+}
+$("auto-read").onchange = async () => {
+  const field = $("auto-read");
+  field.disabled = true;
+  try {
+    await api("settings", { autonomous: field.checked });
+    await refresh(false);
+    status(
+      field.checked
+        ? "自动朗读已开启：Pet 的所有文字输出都会出声"
+        : "自动朗读已关闭",
+      "ok",
+    );
+  } catch (error) {
+    field.checked = readingEnabled;
+    playbackError(error);
+  } finally {
+    field.disabled = false;
+  }
+};
+
+$("stop-all").onclick = () => void stop();

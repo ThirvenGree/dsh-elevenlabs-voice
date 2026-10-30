@@ -596,11 +596,65 @@
           animation: none !important;
         }
       }
+      .pv-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding-bottom: 12px;
+      }
+      .pv-toolbar strong {
+        font-size: 16px;
+      }
+      nav.pv-tabs {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+        padding-bottom: 12px;
+      }
+      #automatic-panel {
+        margin-top: 12px;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      [aria-pressed="true"] {
+        background: color-mix(in srgb, var(--listen) 13%, var(--surface));
+        color: var(--listen);
+      }
     </style>
   </head>
   <body data-call="idle">
     <main class="pv">
-      <section class="pv-call" aria-label="实时对话">
+      <header class="pv-toolbar">
+        <strong>Pet 语音</strong
+        ><button id="stop-all" class="pv-btn" type="button">停止说话</button>
+      </header>
+      <nav class="pv-tabs" aria-label="语音方式">
+        <button class="pv-btn" id="mode-realtime" aria-pressed="true">
+          实时对话
+        </button>
+        <button class="pv-btn" id="mode-text" aria-pressed="false">
+          文字对话
+        </button>
+        <button class="pv-btn" id="mode-automatic" aria-pressed="false">
+          自动朗读 Pet
+        </button>
+      </nav>
+      <section id="automatic-panel" class="pv-group" hidden>
+        <label class="pv-field"
+          ><span class="pv-label">朗读 Pet 的所有文字输出</span>
+          <input id="auto-read" class="pv-switch" type="checkbox"
+        /></label>
+        <p class="pv-hint">
+          开启后，回复、碎碎念及其他气泡文字都会生成语音。正在对话、播放或听写时先排队；已经出声的回复不重复朗读。桌面端和网页端共用设置，只由一端播放。
+        </p>
+      </section>
+      <section id="realtime-panel" class="pv-call" aria-label="实时对话">
         <button
           id="orb"
           class="pv-orb"
@@ -688,9 +742,10 @@
         <div class="pv-composer">
           <label class="pv-sr" for="text">输入文字</label>
           <textarea
+            aria-label="输入文字，Pet 将回复文字和对应语音"
             id="text"
             rows="1"
-            placeholder="和 Pet 聊天，或输入要直接朗读的文字"
+            placeholder="输入文字，Pet 会回复文字和对应语音"
           ></textarea>
           <div class="pv-bar">
             <span class="pv-links">
@@ -706,14 +761,7 @@
                 清空对话
               </button>
             </span>
-            <button
-              id="speak"
-              class="pv-btn"
-              type="button"
-              title="直接朗读输入框里的文字，不经过对话模型"
-            >
-              朗读
-            </button>
+
             <button
               id="chat"
               class="pv-btn pv-primary"
@@ -837,43 +885,6 @@
                   min="1"
                   max="60"
                 /><span class="pv-unit">分钟</span></span
-              >
-            </label>
-          </div>
-
-          <div class="pv-group">
-            <h3 class="pv-group-title">自动出声</h3>
-            <label class="pv-field">
-              <span class="pv-label">让已有台词自动出声</span>
-              <span class="pv-hint"
-                >默认关闭。02:00–06:00 不出声，实时对话和 DSH 听写时让路。</span
-              >
-              <span class="pv-control"
-                ><input class="pv-switch" type="checkbox" name="autonomous"
-              /></span>
-            </label>
-            <label class="pv-field">
-              <span class="pv-label">两次之间至少间隔</span>
-              <span class="pv-control"
-                ><input
-                  class="pv-input"
-                  name="cooldownMinutes"
-                  type="number"
-                  min="1"
-                  max="1440"
-                /><span class="pv-unit">分钟</span></span
-              >
-            </label>
-            <label class="pv-field">
-              <span class="pv-label">每小时最多</span>
-              <span class="pv-control"
-                ><input
-                  class="pv-input"
-                  name="hourlyLimit"
-                  type="number"
-                  min="1"
-                  max="20"
-                /><span class="pv-unit">次</span></span
               >
             </label>
           </div>

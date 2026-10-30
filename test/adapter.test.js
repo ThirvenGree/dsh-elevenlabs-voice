@@ -38,7 +38,9 @@ function tree(adapted, panel) {
 }
 const panelItem = manifest.files.find((x) => x.file === PANEL);
 test("an adapted dsh-pet upgrades only the floating window from v1.1", () => {
-  assert.ok(panelItem.replaces.includes(sha256(oldPanel)));
+  assert.ok(
+    panelItem.replaces.includes(sha256(oldPanel.replaceAll("\r\n", "\n"))),
+  );
   const { root, target } = tree(true, oldPanel);
   try {
     const pending = planAdapter(target, manifest);
@@ -72,6 +74,26 @@ test("a fresh dsh-pet receives every adapter change", () => {
   const { root, target } = tree(false, "");
   try {
     assert.equal(planAdapter(target, manifest).length, manifest.files.length);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("v1.3 bridge upgrades the output subscription once and remains idempotent", () => {
+  const { root, target } = tree(true, panelItem.create);
+  try {
+    const item = manifest.files.find((x) => x.file === "src/host/index.ts");
+    const edit = item.edits.find((x) => x.beforeVariants);
+    const file = path.join(target, item.file);
+    fs.writeFileSync(
+      file,
+      fs.readFileSync(file, "utf8").replace(edit.after, edit.beforeVariants[0]),
+    );
+    const changes = planAdapter(target, manifest);
+    assert.equal(changes.length, 1);
+    assert.match(changes[0].current, /watchSay/);
+    fs.writeFileSync(file, changes[0].current);
+    assert.deepEqual(planAdapter(target, manifest), []);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
