@@ -425,7 +425,7 @@ window.__ModuleLoader__.load({
           }
           return item;
         }
-        async function play(text, sid, label = "回答") {
+        async function play(text, sid, label = "回答", source = null) {
           if (!allowed("tts")) return;
           stopPlayback();
           const parts = chunks(text);
@@ -445,6 +445,8 @@ window.__ModuleLoader__.load({
             loading: true,
             progress: 0,
             label,
+            source,
+            ended: false,
             segmentProgress: 0,
           };
           p.audio.volume = cfg.volume;
@@ -537,14 +539,19 @@ window.__ModuleLoader__.load({
               if (p.index + 1 < parts.length)
                 void prepare(p.index + 1).catch(() => {});
             } catch (e) {
-              if (e.name !== "AbortError" && generation === playerGeneration)
+              if (e.name === "AbortError" || generation !== playerGeneration)
+                return;
+              // A blocked autoplay keeps the player so one click resumes it;
+              // any other failure leaves nothing to resume.
+              if (e.name === "NotAllowedError")
                 update({
-                  error:
-                    e.name === "NotAllowedError"
-                      ? "浏览器阻止播放，请点击继续播放"
-                      : e.message,
+                  error: "浏览器阻止了自动播放，请点击播放键继续",
                   player: { ...p, loading: false, paused: true },
                 });
+              else {
+                stopPlayback();
+                update({ error: e.message });
+              }
             }
           };
           p.audio.onended = () => {
@@ -553,20 +560,141 @@ window.__ModuleLoader__.load({
             else {
               p.index = parts.length - 1;
               p.paused = true;
+              p.ended = true;
               p.progress = 1;
               update({ player: { ...p } });
             }
           };
           p.audio.onerror = () => {
-            if (generation === playerGeneration)
-              update({
-                error: "音频播放失败，请检查输出设备",
-                player: { ...p, loading: false, paused: true },
-              });
+            if (generation !== playerGeneration) return;
+            stopPlayback();
+            update({ error: "音频播放失败，请检查输出设备" });
           };
-          p.replay = () => void play(text, sid, label);
+          p.replay = () => void play(text, sid, label, source);
           void run();
         }
+        // Line icons drawn at 16px to sit beside DSH's own action icons.
+        const STROKE = {
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: 1.5,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+        };
+        const ICONS = {
+          mic: [
+            [
+              "path",
+              {
+                ...STROKE,
+                d: "M8 2.2a2.2 2.2 0 0 0-2.2 2.2v3.4a2.2 2.2 0 0 0 4.4 0V4.4A2.2 2.2 0 0 0 8 2.2ZM4.2 7.6a3.8 3.8 0 0 0 7.6 0M8 11.4v2.4",
+              },
+            ],
+          ],
+          speaker: [
+            [
+              "path",
+              {
+                ...STROKE,
+                d: "M2.5 6.2h2.1L7.5 3.8v8.4L4.6 9.8H2.5zM10.2 6a2.8 2.8 0 0 1 0 4M12 4.2a5.3 5.3 0 0 1 0 7.6",
+              },
+            ],
+          ],
+          stop: [
+            [
+              "rect",
+              {
+                x: 4,
+                y: 4,
+                width: 8,
+                height: 8,
+                rx: 1.6,
+                fill: "currentColor",
+              },
+            ],
+          ],
+          play: [
+            [
+              "path",
+              {
+                d: "M5.2 3.6v8.8a.6.6 0 0 0 .9.5l7-4.4a.6.6 0 0 0 0-1L6.1 3.1a.6.6 0 0 0-.9.5Z",
+                fill: "currentColor",
+              },
+            ],
+          ],
+          pause: [
+            [
+              "rect",
+              {
+                x: 4.2,
+                y: 3.5,
+                width: 2.6,
+                height: 9,
+                rx: 0.9,
+                fill: "currentColor",
+              },
+            ],
+            [
+              "rect",
+              {
+                x: 9.2,
+                y: 3.5,
+                width: 2.6,
+                height: 9,
+                rx: 0.9,
+                fill: "currentColor",
+              },
+            ],
+          ],
+          replay: [
+            ["path", { ...STROKE, d: "M3 8a5 5 0 1 0 1.5-3.6M3 2.5v2.4h2.4" }],
+          ],
+          close: [["path", { ...STROKE, d: "M4.5 4.5l7 7M11.5 4.5l-7 7" }]],
+          alert: [
+            ["circle", { ...STROKE, cx: 8, cy: 8, r: 5.8 }],
+            ["path", { ...STROKE, d: "M8 5v3.4M8 10.8v.1" }],
+          ],
+          spinner: [
+            [
+              "circle",
+              { ...STROKE, cx: 8, cy: 8, r: 5.5, strokeOpacity: 0.25 },
+            ],
+            ["path", { ...STROKE, d: "M13.5 8A5.5 5.5 0 0 0 8 2.5" }],
+          ],
+        };
+        const icon = (name) =>
+          h("svg", {
+            className: "elv-icon" + (name === "spinner" ? " elv-spin" : ""),
+            viewBox: "0 0 16 16",
+            "aria-hidden": "true",
+            focusable: "false",
+            children: ICONS[name].map(([tag, props], i) => h(tag, props, i)),
+          });
+        const clock = (seconds) => {
+          if (!Number.isFinite(seconds) || seconds < 0) return "--:--";
+          const whole = Math.floor(seconds);
+          return (
+            Math.floor(whole / 60) + ":" + String(whole % 60).padStart(2, "0")
+          );
+        };
+        const percent = (value) =>
+          Math.round((Number.isFinite(value) ? value : 0) * 100) + "%";
+        const iconButton = (label, name, onClick, disabled = false) =>
+          h("button", {
+            type: "button",
+            className: "elv-act",
+            title: label,
+            "aria-label": label,
+            disabled,
+            onClick,
+            children: icon(name),
+          });
+        const MIC_LABELS = {
+          idle: "语音输入",
+          requesting: "等待麦克风权限",
+          recording: "结束录音并转写",
+          transcribing: "正在转写",
+        };
         function Mic({ sessionId }) {
           const s = useStore();
           useEffect(() => {
@@ -580,19 +708,26 @@ window.__ModuleLoader__.load({
             };
           }, [sessionId]);
           if (!allowed("stt")) return null;
+          const phase = s.recording || "idle";
           return h("button", {
-            className: "elv-button",
-            title: s.recording ? "结束录音并转写" : "ElevenLabs 语音输入",
-            disabled:
-              s.recording === "transcribing" || s.recording === "requesting",
+            type: "button",
+            className: "elv-mic",
+            "data-state": phase,
+            title: MIC_LABELS[phase],
+            "aria-label": MIC_LABELS[phase],
+            disabled: phase === "transcribing" || phase === "requesting",
             onClick: () =>
               s.recording ? stopRecording() : void startRecording(sessionId),
             children:
-              s.recording === "recording"
-                ? "⏹ " + s.elapsed + "s"
-                : s.recording
-                  ? "…"
-                  : "🎙",
+              phase === "recording"
+                ? [
+                    h("span", {
+                      className: "elv-rec-dot",
+                      "aria-hidden": "true",
+                    }),
+                    clock(s.elapsed),
+                  ]
+                : icon(phase === "idle" ? "mic" : "spinner"),
           });
         }
         function Reply({ sessionId, messageId }) {
@@ -645,19 +780,28 @@ window.__ModuleLoader__.load({
             !bodyRef.current
           )
             return null;
+          const key = sessionId + ":" + messageId,
+            playing = config.playing === key;
           return h("span", {
             className: "elv-reply",
             ref: element,
             children: [
               h("button", {
-                className: "elv-button",
-                title: "仅朗读这条回答正文",
-                onClick: () => void play(bodyRef.current, sessionId),
-                children: "▶ 朗读",
+                type: "button",
+                className: "elv-act",
+                "data-active": playing ? "" : undefined,
+                title: playing ? "停止朗读" : "朗读这条回答",
+                "aria-label": playing ? "停止朗读" : "朗读这条回答",
+                onClick: () =>
+                  playing
+                    ? stopPlayback()
+                    : void play(bodyRef.current, sessionId, "回答", key),
+                children: icon(playing ? "stop" : "speaker"),
               }),
               selection &&
                 h("button", {
-                  className: "elv-button",
+                  type: "button",
+                  className: "elv-act elv-act--text",
                   onPointerDown: (e) => e.preventDefault(),
                   onClick: () => {
                     const text = selectedBody(
@@ -665,49 +809,111 @@ window.__ModuleLoader__.load({
                       element.current,
                       window.getSelection(),
                     );
-                    if (text) void play(text, sessionId, "选中内容");
+                    if (text) void play(text, sessionId, "选中内容", key);
                     else setSelection("");
                   },
-                  children: "朗读选中内容",
+                  children: [icon("speaker"), "朗读选中内容"],
                 }),
             ],
           });
         }
+        const PLAYER_TITLES = {
+          回答: "朗读回答",
+          选中内容: "朗读选中内容",
+          试听: "声音试听",
+        };
+        const REC_COPY = {
+          requesting: ["等待麦克风权限", "请在系统提示里允许使用麦克风"],
+          recording: ["正在录音", null],
+          transcribing: ["正在转写", "完成后放进输入框，发送前可以修改"],
+        };
         function Panel() {
           const s = useStore();
           if (!s.config?.enabled || !s.config?.dshEnabled) return null;
           if (!s.recording && !s.pending && !s.player && !s.error && !s.status)
             return null;
           const p = s.player;
-          return h("div", {
-            className: "elv-panel",
-            children: [
-              h("strong", { children: "ElevenLabs Voice" }),
-              s.recording &&
+          const text = (title, meta) =>
+            h("div", {
+              className: "elv-text",
+              children: [
+                h("p", { className: "elv-title", children: title }),
+                meta && h("p", { className: "elv-meta", children: meta }),
+              ],
+            });
+          const recording =
+            s.recording &&
+            h("div", {
+              className: "elv-block",
+              children: [
                 h("div", {
+                  className: "elv-line",
                   children: [
-                    s.status + " " + s.elapsed + "s ",
-                    h("meter", { min: 0, max: 1, value: s.level }),
+                    s.recording === "recording"
+                      ? h("span", {
+                          className: "elv-rec-dot elv-rec-dot--lg",
+                          "aria-hidden": "true",
+                        })
+                      : icon("spinner"),
+                    text(
+                      REC_COPY[s.recording][0],
+                      REC_COPY[s.recording][1] ||
+                        clock(s.elapsed) +
+                          " / 最长 " +
+                          clock(s.config.maxSeconds),
+                    ),
+                    h("button", {
+                      type: "button",
+                      className: "elv-btn",
+                      onClick: cancelRecording,
+                      children: "取消",
+                    }),
                     s.recording === "recording" &&
                       h("button", {
+                        type: "button",
+                        className: "elv-btn elv-btn--primary",
                         onClick: stopRecording,
                         children: "结束并转写",
                       }),
-                    h("button", { onClick: cancelRecording, children: "取消" }),
                   ],
                 }),
-              !s.recording && s.status && h("div", { children: s.status }),
-              s.pending &&
+                s.recording === "recording" &&
+                  h("div", {
+                    className: "elv-level",
+                    "aria-hidden": "true",
+                    children: h("span", { style: { width: percent(s.level) } }),
+                  }),
+              ],
+            });
+          const pending =
+            s.pending &&
+            h("div", {
+              className: "elv-block",
+              children: [
                 h("div", {
+                  className: "elv-line",
                   children: [
-                    h("textarea", {
-                      value: s.pending.text,
-                      onChange: (e) =>
-                        update({
-                          pending: { ...s.pending, text: e.target.value },
-                        }),
+                    text("转写结果", s.status),
+                    iconButton("丢弃转写结果", "close", () =>
+                      update({ pending: null, status: "" }),
+                    ),
+                  ],
+                }),
+                h("textarea", {
+                  className: "elv-panel-text",
+                  "aria-label": "转写结果",
+                  value: s.pending.text,
+                  onChange: (e) =>
+                    update({
+                      pending: { ...s.pending, text: e.target.value },
                     }),
+                }),
+                h("div", {
+                  className: "elv-actions",
+                  children: [
                     h("button", {
+                      type: "button",
+                      className: "elv-btn",
                       onClick: () =>
                         void navigator.clipboard
                           .writeText(s.pending.text)
@@ -718,6 +924,8 @@ window.__ModuleLoader__.load({
                       children: "复制",
                     }),
                     h("button", {
+                      type: "button",
+                      className: "elv-btn elv-btn--primary",
                       onClick: () => {
                         try {
                           if (
@@ -735,100 +943,140 @@ window.__ModuleLoader__.load({
                       },
                       children: "插入当前会话",
                     }),
-                    h("button", {
-                      onClick: () => update({ pending: null }),
-                      children: "丢弃",
-                    }),
                   ],
                 }),
-              p &&
+              ],
+            });
+          const note =
+            !s.recording &&
+            !s.pending &&
+            s.status &&
+            h("div", {
+              className: "elv-block elv-note",
+              role: "status",
+              children: [
+                h("p", { className: "elv-note-text", children: s.status }),
+                iconButton("收起", "close", () => update({ status: "" })),
+              ],
+            });
+          let player = null;
+          if (p) {
+            const duration = p.audio.duration,
+              current = p.audio.currentTime,
+              volume = p.audio.volume;
+            const state = p.loading
+              ? "正在生成语音…"
+              : p.ended
+                ? "播放完毕"
+                : p.paused
+                  ? "已暂停"
+                  : "正在播放";
+            player = h("div", {
+              className: "elv-block",
+              children: [
+                p.total > 1 &&
+                  h("progress", {
+                    className: "elv-overall",
+                    max: 1,
+                    value: p.progress,
+                    "aria-label": "整体播放进度",
+                  }),
                 h("div", {
+                  className: "elv-line",
                   children: [
-                    h("span", {
-                      children:
-                        (p.loading
-                          ? "生成中…"
-                          : p.paused
-                            ? "已暂停"
-                            : "播放中") +
-                        " " +
-                        p.label +
-                        " " +
-                        (p.index + 1) +
-                        "/" +
-                        p.total,
-                    }),
                     h("button", {
+                      type: "button",
+                      className: "elv-play",
                       disabled: p.loading,
+                      "aria-label": p.paused ? "继续" : "暂停",
+                      title: p.paused ? "继续" : "暂停",
                       onClick: () => {
-                        if (p.audio.paused)
+                        if (p.ended) p.replay();
+                        else if (p.audio.paused)
                           void p.audio
                             .play()
                             .catch((e) => update({ error: e.message }));
                         else p.audio.pause();
                       },
-                      children: p.paused ? "继续" : "暂停",
+                      children: icon(
+                        p.loading ? "spinner" : p.paused ? "play" : "pause",
+                      ),
                     }),
-                    h("progress", {
-                      max: 1,
-                      value: p.progress,
-                      "aria-label": "整体播放进度",
-                    }),
-                    h("button", { onClick: stopPlayback, children: "停止" }),
-                    h("button", {
-                      disabled: p.loading,
-                      onClick: p.replay,
-                      children: "重播",
-                    }),
+                    text(
+                      PLAYER_TITLES[p.label] || p.label,
+                      state +
+                        (p.total > 1
+                          ? "，第 " + (p.index + 1) + "/" + p.total + " 段"
+                          : ""),
+                    ),
+                    iconButton("重播", "replay", p.replay, p.loading),
+                    iconButton("停止", "close", stopPlayback),
+                  ],
+                }),
+                h("div", {
+                  className: "elv-controls",
+                  children: [
                     h("input", {
                       type: "range",
+                      className: "elv-slider elv-seek",
+                      "aria-label": p.total > 1 ? "当前段进度" : "播放进度",
                       min: 0,
                       max: 1,
                       step: 0.01,
                       value: p.segmentProgress,
-                      title: "当前段进度；总体进度见上方",
+                      style: { "--elv-fill": percent(p.segmentProgress) },
                       onChange: (e) => {
                         if (Number.isFinite(p.audio.duration))
                           p.audio.currentTime =
                             Number(e.target.value) * p.audio.duration;
                       },
                     }),
-                    h("label", {
+                    h("span", {
+                      className: "elv-time",
+                      children: clock(current) + " / " + clock(duration),
+                    }),
+                    h("span", {
+                      className: "elv-vol",
                       children: [
-                        "音量 ",
+                        icon("speaker"),
                         h("input", {
                           type: "range",
+                          className: "elv-slider",
+                          "aria-label": "音量",
                           min: 0,
                           max: 1,
                           step: 0.05,
-                          defaultValue: s.config.volume,
+                          value: volume,
+                          style: { "--elv-fill": percent(volume) },
                           onChange: (e) => {
                             p.audio.volume = Number(e.target.value);
+                            update({ player: { ...p } });
                           },
                         }),
                       ],
                     }),
                   ],
                 }),
-              s.error &&
-                h("div", {
-                  className: "elv-error",
-                  children: [
-                    s.error,
-                    h("button", {
-                      onClick: () => update({ error: "" }),
-                      children: "关闭",
-                    }),
-                  ],
-                }),
-              !s.recording &&
-                !p &&
-                !s.pending &&
-                h("button", {
-                  onClick: () => update({ status: "", error: "" }),
-                  children: "收起",
-                }),
-            ],
+              ],
+            });
+          }
+          const error =
+            s.error &&
+            h("div", {
+              className: "elv-block elv-note",
+              "data-tone": "error",
+              role: "alert",
+              children: [
+                icon("alert"),
+                h("p", { className: "elv-note-text", children: s.error }),
+                iconButton("关闭提示", "close", () => update({ error: "" })),
+              ],
+            });
+          return h("div", {
+            className: "elv-panel",
+            role: "region",
+            "aria-label": "ElevenLabs 语音",
+            children: [recording, pending, note, player, error],
           });
         }
         function Settings() {
@@ -1294,15 +1542,13 @@ window.__ModuleLoader__.load({
             ],
           });
         }
-        const LEGACY_CSS =
-          ".elv-button{border:1px solid #ccd6df88;border-radius:8px;padding:4px 9px;background:transparent;color:inherit;cursor:pointer;font-size:12px}.elv-reply{display:inline-flex;gap:5px}.elv-panel{position:fixed;bottom:74px;right:28px;z-index:10000;max-width:440px;max-height:70vh;overflow:auto;padding:16px;border:1px solid #95aabb77;border-radius:16px;background:var(--background,#f4f7fa);color:var(--foreground,#172a39);box-shadow:0 10px 40px #0002;font-size:13px}.elv-panel textarea{width:100%;min-height:80px}.elv-panel button{margin:5px;padding:4px 8px}.elv-panel input[type=range]{max-width:150px}.elv-error{color:#b33b3b}";
         const style = document.createElement("style");
-        // Settings follow DSH's own settings vocabulary and semantic tokens, so
-        // every skin and the dark theme apply without a second palette.
-        style.textContent =
-          LEGACY_CSS +
-          `
-.elv-settings{--elv-ink:var(--dsw-alias-label-primary,#1f2328);--elv-ink-2:var(--dsw-alias-label-secondary,#59636e);--elv-ink-3:var(--dsw-alias-label-tertiary,#8b949e);--elv-line:var(--dsw-alias-border-l2,rgb(31 35 40 / 12%));--elv-card:var(--dsw-alias-bg-layer-3,#fff);--elv-page:var(--dsw-alias-bg-layer-2,#f6f7f9);--elv-chip:var(--dsw-alias-bg-module-platform,rgb(31 35 40 / 6%));--elv-brand:var(--dsw-alias-brand-primary,#3f6ae0);--elv-fill-btn:var(--dsw-alias-button-primary-fill,var(--elv-ink));--elv-on-fill:var(--dsw-alias-label-primary-foreground,var(--elv-card));--elv-error:var(--dsw-alias-state-error-primary,#b42318);--elv-rail:var(--dsw-alias-label-dimmed,rgb(31 35 40 / 22%));--elv-hover:var(--dsw-alias-interactive-bg-hover,rgb(31 35 40 / 5%));container:elv-settings/inline-size;display:flex;flex-direction:column;gap:16px;max-width:720px;color:var(--elv-ink);font-size:14px;line-height:22px}
+        // Every surface uses DSH's own semantic tokens, so each skin and the
+        // dark theme apply without a second palette; settings also follow
+        // DSH's settings-row vocabulary.
+        style.textContent = `
+:is(.elv-settings,.elv-panel,.elv-reply,.elv-mic){--elv-ink:var(--dsw-alias-label-primary,#1f2328);--elv-ink-2:var(--dsw-alias-label-secondary,#59636e);--elv-ink-3:var(--dsw-alias-label-tertiary,#8b949e);--elv-line:var(--dsw-alias-border-l2,rgb(31 35 40 / 12%));--elv-card:var(--dsw-alias-bg-layer-3,#fff);--elv-page:var(--dsw-alias-bg-layer-2,#f6f7f9);--elv-chip:var(--dsw-alias-bg-module-platform,rgb(31 35 40 / 6%));--elv-brand:var(--dsw-alias-brand-primary,#3f6ae0);--elv-fill-btn:var(--dsw-alias-button-primary-fill,var(--elv-ink));--elv-on-fill:var(--dsw-alias-label-primary-foreground,var(--elv-card));--elv-error:var(--dsw-alias-state-error-primary,#b42318);--elv-rail:var(--dsw-alias-label-dimmed,rgb(31 35 40 / 22%));--elv-hover:var(--dsw-alias-interactive-bg-hover,rgb(31 35 40 / 5%));--elv-rec:var(--dsw-alias-state-error-primary,#d1453b)}
+.elv-settings{container:elv-settings/inline-size;display:flex;flex-direction:column;gap:16px;max-width:720px;color:var(--elv-ink);font-size:14px;line-height:22px}
 .elv-settings *,.elv-settings *::before,.elv-settings *::after{box-sizing:border-box}
 .elv-settings p{margin:0}
 .elv-loading{color:var(--elv-ink-2);font-size:13px}
@@ -1352,12 +1598,13 @@ select.elv-input{padding-right:8px;cursor:pointer}
 .elv-chip[data-tone=error]::before{background:var(--elv-error)}
 .elv-range{display:inline-flex;align-items:center;gap:12px;width:240px;max-width:100%}
 .elv-range output{min-width:38px;color:var(--elv-ink-2);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
-.elv-range input{flex:1;min-width:0;height:20px;margin:0;background:transparent;appearance:none;cursor:pointer}
-.elv-range input::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(to right,var(--elv-brand) var(--elv-fill,0%),color-mix(in srgb,var(--elv-ink) 12%,transparent) var(--elv-fill,0%))}
-.elv-range input::-webkit-slider-thumb{width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgb(0 0 0 / 12%),0 1px 3px rgb(0 0 0 / 25%);appearance:none}
-.elv-range input::-moz-range-track{height:4px;border-radius:999px;background:color-mix(in srgb,var(--elv-ink) 12%,transparent)}
-.elv-range input::-moz-range-progress{height:4px;border-radius:999px;background:var(--elv-brand)}
-.elv-range input::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgb(0 0 0 / 12%),0 1px 3px rgb(0 0 0 / 25%)}
+.elv-range input{flex:1;min-width:0}
+.elv-slider,.elv-range input{height:20px;margin:0;background:transparent;appearance:none;cursor:pointer}
+.elv-slider::-webkit-slider-runnable-track,.elv-range input::-webkit-slider-runnable-track{height:4px;border-radius:999px;background:linear-gradient(to right,var(--elv-brand) var(--elv-fill,0%),color-mix(in srgb,var(--elv-ink) 12%,transparent) var(--elv-fill,0%))}
+.elv-slider::-webkit-slider-thumb,.elv-range input::-webkit-slider-thumb{width:14px;height:14px;margin-top:-5px;border:0;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgb(0 0 0 / 12%),0 1px 3px rgb(0 0 0 / 25%);appearance:none}
+.elv-slider::-moz-range-track,.elv-range input::-moz-range-track{height:4px;border-radius:999px;background:color-mix(in srgb,var(--elv-ink) 12%,transparent)}
+.elv-slider::-moz-range-progress,.elv-range input::-moz-range-progress{height:4px;border-radius:999px;background:var(--elv-brand)}
+.elv-slider::-moz-range-thumb,.elv-range input::-moz-range-thumb{width:14px;height:14px;border:0;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgb(0 0 0 / 12%),0 1px 3px rgb(0 0 0 / 25%)}
 .elv-settings :is(.elv-btn,.elv-text-btn,.elv-switch,.elv-range input):focus-visible{outline:2px solid var(--elv-brand);outline-offset:2px}
 .elv-savebar{position:sticky;bottom:12px;z-index:1;display:flex;align-items:center;gap:8px;padding:10px 12px 10px 16px;border:1px solid var(--elv-line);border-radius:12px;background:var(--elv-card);box-shadow:0 4px 16px rgb(20 20 19 / 8%)}
 .elv-savebar-text{flex:1;min-width:0;color:var(--elv-ink-2);font-size:13px;line-height:20px;overflow-wrap:anywhere}
@@ -1365,7 +1612,54 @@ select.elv-input{padding-right:8px;cursor:pointer}
 .elv-savebar[data-dirty] .elv-savebar-text:not([data-tone])::before{content:"";display:inline-block;width:7px;height:7px;margin-right:8px;border-radius:50%;background:var(--elv-brand);vertical-align:1px}
 .elv-savebar-text[data-tone=error]{color:var(--elv-error)}
 @container elv-settings (max-width:520px){.elv-row:not(.elv-row--inline){grid-template-columns:minmax(0,1fr);grid-template-areas:"label" "hint" "control";row-gap:4px}.elv-row:not(.elv-row--inline)>.elv-control{margin-top:8px;justify-self:stretch}.elv-input,.elv-range{width:100%}.elv-action{align-items:stretch}.elv-result{max-width:none;text-align:left}.elv-card-head{align-items:flex-start}}
-@media (prefers-reduced-motion:reduce){.elv-switch,.elv-switch-thumb,.elv-btn{transition:none}}
+.elv-icon{display:block;flex:none;width:16px;height:16px}
+.elv-spin{animation:elv-spin .9s linear infinite}
+@keyframes elv-spin{to{rotate:1turn}}
+.elv-rec-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--elv-rec);animation:elv-pulse 1.2s ease-in-out infinite}
+.elv-rec-dot--lg{width:10px;height:10px;margin:0 3px}
+@keyframes elv-pulse{50%{opacity:.35}}
+.elv-mic{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;min-width:32px;padding:0 8px;border:0;border-radius:8px;background:transparent;color:var(--elv-ink-2);font:inherit;font-size:12px;font-variant-numeric:tabular-nums;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.elv-mic:hover:not(:disabled){background:var(--elv-hover);color:var(--elv-ink)}
+.elv-mic:disabled{cursor:default}
+.elv-mic[data-state=recording],.elv-mic[data-state=recording]:hover:not(:disabled){padding:0 10px;background:color-mix(in srgb,var(--elv-rec) 12%,transparent);color:var(--elv-rec)}
+.elv-reply{display:inline-flex;align-items:center;gap:2px;vertical-align:middle}
+.elv-act{display:inline-flex;align-items:center;justify-content:center;gap:5px;flex:none;height:28px;min-width:28px;padding:0 6px;border:0;border-radius:6px;background:transparent;color:var(--elv-ink-2);font:inherit;font-size:12px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,color .12s ease}
+.elv-act:hover:not(:disabled){background:var(--elv-hover);color:var(--elv-ink)}
+.elv-act:disabled{cursor:default;opacity:.4}
+.elv-act[data-active],.elv-act[data-active]:hover:not(:disabled){color:var(--elv-brand)}
+.elv-act--text{padding:0 8px}
+:is(.elv-mic,.elv-act,.elv-play,.elv-panel .elv-btn,.elv-slider,.elv-panel-text):focus-visible{outline:2px solid var(--elv-brand);outline-offset:1px}
+.elv-panel{position:fixed;right:24px;bottom:148px;z-index:10000;display:flex;flex-direction:column;gap:12px;box-sizing:border-box;width:min(360px,calc(100vw - 32px));max-height:min(60vh,520px);overflow:auto;padding:14px;border:1px solid var(--elv-line);border-radius:14px;background:var(--elv-card);color:var(--elv-ink);box-shadow:0 12px 32px rgb(20 20 19 / 14%),0 2px 6px rgb(20 20 19 / 6%);font-size:13px;line-height:20px}
+.elv-panel *,.elv-panel *::before,.elv-panel *::after{box-sizing:border-box}
+.elv-panel p{margin:0}
+.elv-block{display:flex;flex-direction:column;gap:10px;min-width:0}
+.elv-block+.elv-block{padding-top:12px;border-top:1px solid var(--elv-line)}
+.elv-line{display:flex;align-items:center;gap:10px;min-width:0}
+.elv-text{flex:1;min-width:0}
+.elv-title{font-size:13px;font-weight:600;line-height:20px}
+.elv-meta{color:var(--elv-ink-2);font-size:12px;line-height:18px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.elv-play{display:grid;place-items:center;flex:none;width:36px;height:36px;padding:0;border:0;border-radius:50%;background:var(--elv-fill-btn);color:var(--elv-on-fill);cursor:pointer}
+.elv-play:hover:not(:disabled){filter:brightness(1.08)}
+.elv-play:disabled{cursor:default;opacity:.65}
+.elv-overall{position:absolute;top:0;left:0;width:100%;height:2px;border:0;background:transparent;appearance:none}
+.elv-overall::-webkit-progress-bar{background:transparent}
+.elv-overall::-webkit-progress-value{background:var(--elv-brand)}
+.elv-overall::-moz-progress-bar{background:var(--elv-brand)}
+.elv-controls{display:flex;align-items:center;gap:10px;min-width:0}
+.elv-seek{flex:1;min-width:0}
+.elv-time{flex:none;color:var(--elv-ink-2);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.elv-vol{display:flex;flex:none;align-items:center;gap:6px;color:var(--elv-ink-2)}
+.elv-vol .elv-slider{width:64px}
+.elv-level{height:4px;overflow:hidden;border-radius:999px;background:color-mix(in srgb,var(--elv-ink) 10%,transparent)}
+.elv-level span{display:block;height:100%;border-radius:inherit;background:var(--elv-rec);transition:width .1s linear}
+.elv-panel-text{display:block;width:100%;min-height:84px;padding:8px 10px;border:1px solid var(--elv-line);border-radius:8px;background:var(--elv-card);color:var(--elv-ink);font:inherit;font-size:13px;line-height:20px;resize:vertical}
+.elv-actions{display:flex;justify-content:flex-end;gap:8px}
+.elv-note{flex-direction:row;align-items:flex-start;gap:8px}
+.elv-note .elv-icon{margin-top:2px}
+.elv-note-text{flex:1;min-width:0;padding-top:4px;font-size:12.5px;line-height:19px;overflow-wrap:anywhere}
+.elv-note[data-tone=error]{color:var(--elv-error)}
+.elv-note[data-tone=error] .elv-act{color:var(--elv-ink-2)}
+@media (prefers-reduced-motion:reduce){.elv-switch,.elv-switch-thumb,.elv-btn,.elv-mic,.elv-act,.elv-level span{transition:none}.elv-spin,.elv-rec-dot{animation:none}}
 `;
         document.head.append(style);
         const register = (slot, id, component, inject) =>

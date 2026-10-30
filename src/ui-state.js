@@ -32,10 +32,13 @@ export function createStore(initial) {
     clear: () => listeners.clear(),
   };
 }
+// Reply buttons re-render only when a switch flips or a different reply
+// starts or stops playing; progress ticks never reach them.
 export const replyConfig = (s) => ({
   enabled: s.config?.enabled,
   dshEnabled: s.config?.dshEnabled,
   playbackEnabled: s.config?.playbackEnabled,
+  playing: s.player?.source ?? null,
 });
 export function createBodyReader() {
   const cache = new WeakMap();

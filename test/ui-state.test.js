@@ -18,10 +18,17 @@ test("1000 reply subscribers do not rerender for 100 recording/player ticks", ()
   for (let n = 0; n < 100; n++)
     store.set({ level: n, player: { progress: n / 100 } });
   assert.equal(renders, 0);
+  // Starting and stopping a reply is the only playback change they see.
+  store.set({ player: { source: "s:m1", progress: 0 } });
+  assert.equal(renders, 1000);
+  store.set({ player: { source: "s:m1", progress: 0.5 } });
+  assert.equal(renders, 1000);
+  store.set({ player: null });
+  assert.equal(renders, 2000);
   store.set({
     config: { enabled: true, dshEnabled: true, playbackEnabled: false },
   });
-  assert.equal(renders, 1000);
+  assert.equal(renders, 3000);
 });
 test("shared immutable-snapshot body index scans once for all replies", () => {
   let scans = 0;

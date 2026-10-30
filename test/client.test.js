@@ -484,14 +484,14 @@ test("TTS never runs until explicit click; replay uses session memory cache", as
   assert.equal(env.ttsCalls, 1);
   env
     .buttons(env.panel())
-    .find((b) => b.props.children === "重播")
+    .find((b) => b.props["aria-label"] === "重播")
     .props.onClick();
   await flush();
   assert.equal(env.ttsCalls, 1);
   assert.equal(env.audios.at(-1).paused, false);
   env
     .buttons(env.panel())
-    .find((b) => b.props.children === "停止")
+    .find((b) => b.props["aria-label"] === "停止")
     .props.onClick();
   assert.equal(env.audios.at(-1).paused, true);
   env.close();
@@ -547,7 +547,7 @@ test("next chunk is prefetched once while first plays and includes stitching con
   assert.equal(env.ttsCalls, 2); // Two chunks: transition consumes prefetched audio.
   env
     .buttons(env.panel())
-    .find((b) => b.props.children === "重播")
+    .find((b) => b.props["aria-label"] === "重播")
     .props.onClick();
   await flush();
   assert.equal(env.ttsCalls, 2);
@@ -603,5 +603,34 @@ test("dictation reports holding the microphone to the host, in order, including 
     env.dictations.map((d) => d.active),
     [true, false, true, false],
   );
+  env.close();
+});
+test("the reply button stops its own reply while it plays", async () => {
+  const env = await harness();
+  const play = env.buttons(env.reply())[0];
+  assert.equal(play.props["aria-label"], "朗读这条回答");
+  play.props.onClick();
+  await flush();
+  assert.equal(env.ttsCalls, 1);
+  const stop = env.buttons(env.reply())[0];
+  assert.equal(stop.props["aria-label"], "停止朗读");
+  stop.props.onClick();
+  assert.equal(env.audios.at(-1).paused, true);
+  assert.equal(env.panel(), null);
+  assert.equal(env.buttons(env.reply())[0].props["aria-label"], "朗读这条回答");
+  env.close();
+});
+test("a failed synthesis shows only the error, not a dead player", async () => {
+  const env = await harness();
+  env.failTts(1);
+  env.buttons(env.reply())[0].props.onClick();
+  await flush();
+  const panel = JSON.stringify(env.panel());
+  assert.ok(panel.includes("临时故障"));
+  assert.ok(!panel.includes("整体播放进度"));
+  assert.ok(
+    !env.buttons(env.panel()).some((b) => b.props["aria-label"] === "重播"),
+  );
+  assert.equal(env.buttons(env.reply())[0].props["aria-label"], "朗读这条回答");
   env.close();
 });
