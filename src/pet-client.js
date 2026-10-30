@@ -25,6 +25,7 @@ function readingReady() {
       !dictating &&
       !reading,
   });
+  renderStop();
 }
 const readinessTimer = setInterval(readingReady, 500);
 const $ = (id) => document.getElementById(id),
@@ -79,6 +80,12 @@ function renderCall() {
   $("orb").setAttribute("aria-label", action);
   if (conversation && !levelFrame && !reducedMotion)
     levelFrame = requestAnimationFrame(tickLevel);
+  renderStop();
+}
+// "停止说话" appears only while the panel is speaking or about to: a reply
+// being generated, synthesized or played. Realtime talk keeps the orb.
+function renderStop() {
+  $("stop-all").hidden = !(audio || synthesizing || chatBusy || reading);
 }
 // The ring follows your voice while listening and the Pet's while speaking.
 function tickLevel() {
@@ -152,7 +159,10 @@ function line(role, text) {
   syncClear();
   return body;
 }
+// Messages that describe playback in progress; they go when playback stops.
+const PLAYBACK_STATUS = new Set(["正在生成语音…", "正在朗读…"]);
 function stopAudio() {
+  if (PLAYBACK_STATUS.has($("status").textContent)) status("");
   playback++;
   finishAudio?.();
   finishAudio = null;
@@ -187,6 +197,7 @@ function setDictating(active) {
 }
 async function say(text) {
   synthesizing = true;
+  renderStop();
   try {
     stopAudio();
     status("正在生成语音…");
@@ -205,7 +216,7 @@ async function say(text) {
       await new Promise((resolve, reject) => {
         finishAudio = resolve;
         audio.onplaying = () => {
-          status("");
+          status("正在朗读…");
           speaking(true);
         };
         audio.onended = resolve;
@@ -408,6 +419,7 @@ async function readOutput(message) {
     return;
   }
   reading = true;
+  renderStop();
   lastLine = message.text;
   try {
     const completed = await say(message.text);
@@ -433,6 +445,7 @@ async function chat() {
   const text = $("text").value.trim();
   if (!text || chatBusy || dictating) return;
   chatBusy = true;
+  renderStop();
   let version = generation;
   try {
     if (conversation) {
@@ -461,6 +474,7 @@ async function chat() {
   } finally {
     chatBusy = false;
     $("chat").disabled = false;
+    renderStop();
   }
 }
 $("chat").onclick = () => void chat();

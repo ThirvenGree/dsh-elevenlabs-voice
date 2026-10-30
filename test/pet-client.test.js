@@ -159,3 +159,39 @@ test("callbacks from the previous realtime connection do not clear the new one",
   assert.equal(h.run("conversation !== null"), true);
   assert.notEqual(h.get("status").textContent, "语音服务：old error");
 });
+test("the stop button shows only while the panel is speaking or about to", async () => {
+  const h = harness();
+  assert.equal(h.get("stop-all").hidden, true);
+  let resolve;
+  h.pending.chat = () =>
+    new Promise((r) => {
+      resolve = r;
+    });
+  h.get("text").value = "你好";
+  h.run("void chat()");
+  await flush();
+  assert.equal(h.get("stop-all").hidden, false); // waiting for the reply
+  resolve({ ok: true, json: async () => ({ text: "回答" }) });
+  await flush();
+  assert.equal(h.audio.length, 1);
+  assert.equal(h.get("stop-all").hidden, false); // reading it aloud
+  assert.equal(h.get("status").textContent, "正在朗读…");
+  h.audio.at(-1).onended();
+  await flush();
+  assert.equal(h.get("stop-all").hidden, true);
+  // A live realtime conversation keeps the orb as its stop control.
+  await h.run("start()");
+  assert.equal(h.run("conversation !== null"), true);
+  assert.equal(h.get("stop-all").hidden, true);
+});
+test("stopping mid-reading clears the playback message and the stop button", async () => {
+  const h = harness();
+  h.run('void say("一段比较长的话")');
+  await flush();
+  assert.equal(h.get("status").textContent, "正在朗读…");
+  assert.equal(h.get("stop-all").hidden, false);
+  await h.run("stop()");
+  await flush();
+  assert.equal(h.get("status").textContent, "");
+  assert.equal(h.get("stop-all").hidden, true);
+});

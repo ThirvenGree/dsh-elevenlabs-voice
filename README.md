@@ -17,7 +17,7 @@
 下载 GitHub Release 的 `.tgz`，通过 DSH 插件安装入口导入，或使用 DSH CLI：
 
 ```powershell
-dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.3.0.tgz
+dsh plugin --profile desktop add C:\Downloads\dsh-elevenlabs-voice-1.3.2.tgz
 ```
 
 开发安装：
@@ -170,3 +170,9 @@ Key 仍只从 `ELEVENLABS_API_KEY` 读取，需现有 STT/TTS 权限以及 Eleve
 沿用 1.3 的圆形通话控件、主题及可拖动浮窗。实时对话需点击后才开启麦克风；文字对话输出文字和对应语音；自动朗读是独立开关，桌面端与网页端共用每只 Pet 的设置。
 
 计时结束的文字提醒也进入同一自动朗读队列。自动朗读从开启后接收新内容，不补读启动前历史。宿主订阅每次台词写入，避免轮询漏掉连续输出，队列在切换播放端时保留。听写和实时对话优先，结束后继续队列；手动停止当前朗读会取消该条。播放失败显示错误，可用“朗读当前台词”重试。退出 DSH 后内存队列不保留。旧 cooldownMinutes/hourlyLimit 仅兼容读取，不再限制朗读。
+
+### 1.3.2：面板顶部整理
+
+- 去掉面板内与浮窗标题栏重复的「Pet 语音」标题。
+- 三种语音方式改为一个分段切换；下方的「对话 / 设置」改为下划线标签，两排不再像两个相同的控件叠在一起。
+- 「停止说话」只在 Pet 正在回复、生成语音或朗读时出现，旁边显示「正在朗读…」等状态；实时对话仍用圆形按钮结束。停止后状态文字一并清除。

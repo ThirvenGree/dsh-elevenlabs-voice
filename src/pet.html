@@ -247,27 +247,31 @@
         color: var(--listen);
       }
 
+      /* The view switch is a quiet underline row, so it never reads as a
+         second copy of the mode control above it. */
       .pv-tabs {
         display: flex;
-        gap: 2px;
-        padding: 2px;
-        border-radius: 9px;
-        background: color-mix(in srgb, var(--ink) 7%, transparent);
+        gap: 20px;
+        border-bottom: 1px solid var(--line);
       }
       .pv-tab {
-        flex: 1;
-        height: 28px;
+        flex: none;
+        height: 34px;
+        margin-bottom: -1px;
+        padding: 0 2px;
         border: 0;
-        border-radius: 7px;
+        border-bottom: 2px solid transparent;
         background: transparent;
         color: var(--muted);
         font-size: 13px;
         font-weight: 500;
       }
-      .pv-tab[aria-selected="true"] {
-        background: var(--raised);
+      .pv-tab:hover {
         color: var(--ink);
-        box-shadow: 0 1px 2px rgb(20 30 30 / 10%);
+      }
+      .pv-tab[aria-selected="true"] {
+        border-bottom-color: var(--listen);
+        color: var(--ink);
       }
       .pv-panel {
         display: flex;
@@ -596,24 +600,70 @@
           animation: none !important;
         }
       }
-      .pv-toolbar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        padding-bottom: 12px;
-      }
-      .pv-toolbar strong {
-        font-size: 16px;
-      }
-      nav.pv-tabs {
+      .pv-modes {
         display: grid;
         grid-template-columns: repeat(3, 1fr);
+        gap: 2px;
+        margin-bottom: 14px;
+        padding: 2px;
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--ink) 7%, transparent);
+      }
+      .pv-mode {
+        height: 30px;
+        padding: 0 6px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 500;
+        white-space: nowrap;
+      }
+      .pv-mode:hover {
+        color: var(--ink);
+      }
+      .pv-mode[aria-pressed="true"] {
+        background: var(--raised);
+        color: var(--ink);
+        box-shadow: 0 1px 2px rgb(20 30 30 / 10%);
+      }
+      .pv-statusbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .pv-statusbar:has(.pv-status:not(:empty)),
+      .pv-statusbar:has(.pv-stop:not([hidden])) {
+        min-height: 30px;
+        margin-bottom: 10px;
+      }
+      .pv-statusbar .pv-status {
+        flex: 1;
+        min-width: 0;
+        margin: 0;
+      }
+      .pv-stop {
+        display: inline-flex;
+        align-items: center;
         gap: 6px;
-        padding-bottom: 12px;
+        height: 28px;
+        margin-left: auto;
+        padding: 0 12px 0 10px;
+        border-color: color-mix(in srgb, var(--speak) 40%, var(--line));
+        background: color-mix(in srgb, var(--speak) 9%, var(--surface));
+        color: var(--speak);
+        font-size: 12.5px;
+      }
+      .pv-stop:hover:not(:disabled) {
+        border-color: var(--speak);
+      }
+      .pv-stop svg {
+        width: 12px;
+        height: 12px;
       }
       #automatic-panel {
-        margin-top: 12px;
+        margin: 0 0 12px;
         padding: 16px;
         border: 1px solid var(--line);
         border-radius: 12px;
@@ -622,26 +672,33 @@
       [hidden] {
         display: none !important;
       }
-      [aria-pressed="true"] {
-        background: color-mix(in srgb, var(--listen) 13%, var(--surface));
-        color: var(--listen);
-      }
     </style>
   </head>
   <body data-call="idle">
     <main class="pv">
-      <header class="pv-toolbar">
-        <strong>Pet 语音</strong
-        ><button id="stop-all" class="pv-btn" type="button">停止说话</button>
-      </header>
-      <nav class="pv-tabs" aria-label="语音方式">
-        <button class="pv-btn" id="mode-realtime" aria-pressed="true">
+      <nav class="pv-modes" aria-label="语音方式">
+        <button
+          class="pv-mode"
+          id="mode-realtime"
+          type="button"
+          aria-pressed="true"
+        >
           实时对话
         </button>
-        <button class="pv-btn" id="mode-text" aria-pressed="false">
+        <button
+          class="pv-mode"
+          id="mode-text"
+          type="button"
+          aria-pressed="false"
+        >
           文字对话
         </button>
-        <button class="pv-btn" id="mode-automatic" aria-pressed="false">
+        <button
+          class="pv-mode"
+          id="mode-automatic"
+          type="button"
+          aria-pressed="false"
+        >
           自动朗读 Pet
         </button>
       </nav>
@@ -706,7 +763,22 @@
           <p id="call-hint" class="pv-call-hint">点击后才会开启麦克风</p>
         </div>
       </section>
-      <p id="status" class="pv-status" role="status"></p>
+      <div class="pv-statusbar">
+        <p id="status" class="pv-status" role="status"></p>
+        <button id="stop-all" class="pv-btn pv-stop" type="button" hidden>
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <rect
+              x="4"
+              y="4"
+              width="8"
+              height="8"
+              rx="1.6"
+              fill="currentColor"
+            />
+          </svg>
+          停止说话
+        </button>
+      </div>
       <div class="pv-tabs" role="tablist" aria-label="面板内容">
         <button
           id="tab-chat"
